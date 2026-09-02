@@ -21,13 +21,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(b"Bot is alive!")
 
-  # UptimeRobot'un 501 (Not Implemented) hatası almasını önleyen HEAD yanıtı:
   def do_HEAD(self):
     self.send_response(200)
     self.end_headers()
 
   def log_message(self, format, *args):
-    return  # Konsol loglarını kirletmemek için bastırıyoruz
+    return
 
 
 def start_health_check_server():
@@ -36,7 +35,6 @@ def start_health_check_server():
   server.serve_forever()
 
 
-# Web sunucusunu arka plan izleğinde (thread) başlat
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ============================================================
@@ -79,15 +77,15 @@ BIST_30_SET = {
     "TUPRS",
 }
 
-# Özel Tarama Saatleri (Günde 2 Defa)
-TARGET_SCAN_TIMES = ["09:50", "10:10"]
+# Özel Tarama Saatleri (Günde 3 Defa: 09:50, 10:10, 17:45)
+TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45"]
 
 # Strateji Parametreleri
 RSI_DIP_LIMIT = 30  # Dip Avcısı max RSI (14)
 RSI_MOMENTUM_LIMIT = 50  # Günlük Tavan Avcısı min RSI (14)
 CHANGE_MOMENTUM_LIMIT = 2.5  # Minimum günlük % değişim
 
-# Yalnızca YÜKSEK HABER DEĞERİ (4 ve 5 Yıldızlı) Olan KAP Kategorileri
+# Yalnızca YÜKSEK HABER DEĞERİ Olan KAP Kategorileri
 KAP_STAR_MAP = {
     "bedelsiz": ("⭐⭐⭐⭐⭐", "Yüksek Oranlı Bedelsiz / Sermaye Artırımı"),
     "yeni iş ilişkisi": ("⭐⭐⭐⭐⭐", "Yeni İş İlişkisi / Dev İhale"),
@@ -96,7 +94,6 @@ KAP_STAR_MAP = {
     "pay alım": ("⭐⭐⭐⭐", "Şirket Pay Geri Alımı"),
 }
 
-# BİST ~500 Hisse Tam Listesi (İş Yatırım API Çökse Bile 470 Yan Tahtayı Garanti Eder)
 FULL_BIST_LIST = [
     "AAVTUR",
     "ACSEL",
@@ -604,7 +601,6 @@ def send_telegram_msg(message):
 
 
 def get_all_bist_tickers():
-  """BİST'teki tüm hisseleri çeker ve tam olarak ~470 Yan Tahtayı garanti eder."""
   try:
     url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -624,7 +620,6 @@ def get_all_bist_tickers():
   except Exception:
     pass
 
-  # Canlı bağlantı kesilse dahi ~470 yan tahta tam kadro taranır
   fallback_yan_tahta = sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
   print(f"ℹ️ Yerel veritabanından {len(fallback_yan_tahta)} yan tahta yüklendi.")
   return fallback_yan_tahta
@@ -675,7 +670,7 @@ def analyze_tv_stock(symbol):
 
 
 # ============================================================
-# 2. YÜKSEK HABER DEĞERLİ KAP İSTİHBARAT MODÜLÜ (ANLIK)
+# 2. KAP İSTİHBARAT MODÜLÜ (ANLIK)
 # ============================================================
 def check_kap_news():
   global PROCESSED_KAP_LINKS
@@ -708,7 +703,7 @@ def check_kap_news():
 
 
 # ============================================================
-# 3. 470 HİSSE SÜZGEÇLİ ÖZEL SEANS TARAMASI
+# 3. ÖZEL SEANS TARAMASI
 # ============================================================
 def scan_bist_stocks(symbol_list, scan_time):
   print(
@@ -775,21 +770,33 @@ def scan_bist_stocks(symbol_list, scan_time):
 def main():
   send_telegram_msg(
       "🤖 <b>TRADINGVIEW 470 YAN TAHTA BİST BOTU V8 AKTİF!</b>\n⏰ Özel"
-      " Tarama Saatleri: <b>09:50</b> ve <b>10:10</b>\n📊 Toplam Taranan Yan"
-      " Tahta: <b>~470 Adet</b>\n🔥 KAP Haberleri: Yalnızca Yüksek Değerli"
-      " (4-5 Yıldız)"
+      " Tarama Saatleri: <b>09:50</b>, <b>10:10</b> ve <b>17:45</b>\n📊 Toplam"
+      " Taranan Yan Tahta: <b>~470 Adet</b>\n🔥 KAP Haberleri: Yalnızca Yüksek"
+      " Değerli (4-5 Yıldız)"
   )
 
+  # 🚀 1. İLK ÇALIŞTIRMA TARAMASI (Bot başlatıldığı an saat kaç olursa olsun hemen 1 defa çalışır)
+  try:
+    init_symbols = get_all_bist_tickers()
+    send_telegram_msg(
+        "🚀 <b>[BOT BAŞLATILDI - İLK KONTROL TARAMASI BAŞLADI]</b>\n"
+        f"Toplam {len(init_symbols)} adet yan tahta taranıyor..."
+    )
+    scan_bist_stocks(init_symbols, "İLK BAŞLATMA")
+    send_telegram_msg("✅ <b>[İLK KONTROL TARAMASI TAMAMLANDI]</b>")
+  except Exception as e:
+    print(f"Açılış tarama hatası: {e}")
+
+  # ⏰ 2. PERİYODİK SAAT DÖNGÜSÜ (09:50, 10:10 ve 17:45)
   while True:
     try:
       now = datetime.now()
       current_time = now.strftime("%H:%M")
       current_date = now.strftime("%Y-%m-%d")
 
-      # 1. Yüksek Değerli KAP Haberlerini Anlık Tara (Gecikmesiz 30 sn)
+      # KAP haber takibi (Anlık 30 sn)
       check_kap_news()
 
-      # 2. Özel Saat Taramaları (09:50 ve 10:10)
       scan_key = f"{current_date}_{current_time}"
 
       if (
