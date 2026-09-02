@@ -35,10 +35,17 @@ def start_health_check_server():
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ============================================================
-# TELEGRAM BİLGİLERİ VE PARAMETRELER
+# TELEGRAM VE PARAMETRE AYARLARI
 # ============================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
+
+# Takip Edilecek Popüler Kripto Çiftleri
+CRYPTO_LIST = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "NEARUSDT", 
+    "XRPUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT", "DOTUSDT",
+    "BNBUSDT", "APTUSDT", "SUIUSDT", "PEPEUSDT", "SHIBUSDT"
+]
 
 BIST_30_SET = {
     "AKBNK", "ALARK", "ASELS", "ASTOR", "BIMAS", "BRSAN", "DOAS", "EKGYO",
@@ -69,49 +76,45 @@ FULL_BIST_LIST = [
     "ALARK", "ALBRK", "ALCAR", "ALCTL", "ALFAS", "ALGYO", "ALKA", "ALKIM", "ALMAD", "ALTNY",
     "ALVES", "ANELE", "ANGEN", "ANHYT", "ANSGR", "ARASE", "ARCLK", "ARDYZ", "ARENA", "ARSAN",
     "ARTMS", "ARZUM", "ASELS", "ASGYO", "ASTOR", "ASUZU", "ATAGY", "ATAKP", "ATATP", "ATEKS",
-    "ATSYH", "AVGYO", "AVHOL", "AVOD", "AYCES", "AYDEM", "AYEN", "AYGAZ", "AZTEK", "BAGFS",
-    "BAKAB", "BALAT", "BANVT", "BARMA", "BATIS", "BTCIM", "BYDNR", "BEGYO", "BELEN", "BERA",
-    "BEYAZ", "BFREN", "BIENP", "BIGCHE", "BIMAS", "BINBN", "BIOEN", "BIZIM", "BJKAS", "BLCYO",
-    "BMTKS", "BNTAS", "BOBET", "BORLS", "BORSK", "BOSSA", "BRCVN", "BRISA", "BRKO", "BRKSN",
-    "BRMEN", "BRSAN", "BRYAT", "BSOKE", "BSCVN", "BTCIM", "BUCIM", "BURCE", "BURVA", "BVSAN",
-    "BYDNR", "CANTE", "CASA", "CAHIT", "CCOLA", "CELHA", "CEMAS", "CEMTS", "CMBTN", "CMENT",
+    "AVGYO", "AVHOL", "AVOD", "AYCES", "AYDEM", "AYEN", "AYGAZ", "AZTEK", "BAGFS", "BAKAB",
+    "BANVT", "BARMA", "BATIS", "BTCIM", "BYDNR", "BEGYO", "BERA", "BEYAZ", "BFREN", "BIENP",
+    "BIGCHE", "BIMAS", "BINBN", "BIOEN", "BIZIM", "BJKAS", "BLCYO", "BMTKS", "BNTAS", "BOBET",
+    "BORLS", "BORSK", "BOSSA", "BRCVN", "BRISA", "BRKO", "BRKSN", "BRSAN", "BRYAT", "BSOKE",
+    "BUCIM", "BURCE", "BURVA", "BVSAN", "CANTE", "CCOLA", "CELHA", "CEMAS", "CEMTS", "CMBTN",
     "CONSE", "COSMO", "CRDFA", "CRFSA", "CUSAN", "CVMEK", "CWENE", "DAGI", "DAPGM", "DARDL",
     "DGATE", "DGGYO", "DITAS", "DMRGD", "DMSAS", "DNISI", "DOAS", "DOBUR", "DOCTA", "DOGUB",
-    "DOHOL", "DSIOTE", "DURDO", "DYOBY", "EDATA", "EDIP", "EGEEN", "EGEPO", "EGGUB", "EGPRO",
-    "EGSER", "EKIZ", "EKGYO", "EKOS", "EKSUN", "ELITE", "EMKEL", "EMNIS", "ENERY", "ENKAI",
-    "ENSRI", "EPLAS", "ERCB", "EREGL", "ERSU", "ESCAR", "ESCOM", "ESEN", "ETILR", "EUPWR",
-    "EYGYO", "FADE", "FENER", "FLAP", "FMIZP", "FONET", "FORTE", "FORMT", "FRIGO", "FROTO",
-    "FZLGY", "GARAN", "GARFA", "GEDIK", "GEDZA", "GENKE", "GENTS", "GEREL", "GESAN", "GIPTA",
-    "GLBMD", "GLYHO", "GMTAS", "GOKNR", "GOLTS", "GOODY", "GOZDE", "GRSEL", "GRTRK", "GSDHO",
-    "GSDDE", "GSRAY", "GUBRF", "GWIND", "GVTUR", "HALKB", "HATEK", "HATSN", "HDFGS", "HEDEF",
-    "HEKTS", "HKTM", "HLGYO", "HOROZ", "HUBVC", "HUNER", "HURGZ", "ICBCT", "ICUGS", "IDEAS",
-    "IDGYO", "IEYHO", "IHAAS", "IHEVA", "IHGZT", "IHLGM", "IHLAS", "INGRM", "INTEM", "INVEO",
-    "INVES", "IPEKE", "ISATR", "ISBTR", "ISCTR", "ISDMR", "ISFIN", "ISGSY", "ISGYO", "ISKPL",
-    "ISKUR", "ISMEN", "ISSEN", "ITEKS", "ITZRH", "IYZICO", "IZFAS", "IZINV", "IZMDC", "JANTS",
-    "KAEFA", "KAPLM", "KAREL", "KARSN", "KARTN", "KATMR", "KAYSE", "KBORU", "KCAER", "KCHOL",
-    "KENT", "KRVGD", "KGYO", "KHOL", "KIMMR", "KLGYO", "KLMSN", "KLNMA", "KLRZO", "KLSER",
-    "KLSYN", "KMCOR", "KNFRT", "KONKA", "KONTR", "KONYA", "KOTON", "KOZAL", "KOZAA", "KRDMD",
-    "KRDMA", "KRDMB", "KRPLS", "KRSTL", "KRTEK", "KRVGD", "KSTUR", "KTLEV", "KTSKR", "KUTPO",
-    "KUZEY", "LIDER", "LIDFA", "LINK", "LKMNH", "LMKDC", "LOGAN", "LOGO", "LUKSK", "MAALT",
+    "DOHOL", "DURDO", "DYOBY", "EDATA", "EDIP", "EGEEN", "EGEPO", "EGGUB", "EGPRO", "EGSER",
+    "EKGYO", "EKOS", "EKSUN", "ELITE", "EMKEL", "ENERY", "ENKAI", "ENSRI", "EPLAS", "ERCB",
+    "EREGL", "ERSU", "ESCAR", "ESCOM", "ESEN", "ETILR", "EUPWR", "EYGYO", "FADE", "FENER",
+    "FLAP", "FMIZP", "FONET", "FORTE", "FORMT", "FRIGO", "FROTO", "FZLGY", "GARAN", "GARFA",
+    "GEDIK", "GEDZA", "GENKE", "GENTS", "GEREL", "GESAN", "GIPTA", "GLBMD", "GLYHO", "GMTAS",
+    "GOKNR", "GOLTS", "GOODY", "GOZDE", "GRSEL", "GRTRK", "GSDHO", "GSDDE", "GSRAY", "GUBRF",
+    "GWIND", "HALKB", "HATEK", "HATSN", "HDFGS", "HEDEF", "HEKTS", "HKTM", "HLGYO", "HOROZ",
+    "HUBVC", "HUNER", "HURGZ", "ICBCT", "IDEAS", "IDGYO", "IEYHO", "IHAAS", "IHEVA", "IHGZT",
+    "IHLGM", "IHLAS", "INGRM", "INTEM", "INVEO", "INVES", "IPEKE", "ISATR", "ISBTR", "ISCTR",
+    "ISDMR", "ISFIN", "ISGSY", "ISGYO", "ISKPL", "ISMEN", "ISSEN", "IZMDC", "JANTS", "KAREL",
+    "KARSN", "KARTN", "KATMR", "KAYSE", "KBORU", "KCAER", "KCHOL", "KENT", "KRVGD", "KGYO",
+    "KIMMR", "KLGYO", "KLMSN", "KLNMA", "KLSER", "KLSYN", "KNFRT", "KONKA", "KONTR", "KONYA",
+    "KOTON", "KOZAL", "KOZAA", "KRDMD", "KRDMA", "KRDMB", "KRPLS", "KRSTL", "KRTEK", "KTLEV",
+    "KTSKR", "KUTPO", "LIDER", "LIDFA", "LINK", "LKMNH", "LMKDC", "LOGO", "LUKSK", "MAALT",
     "MACKO", "MAGEN", "MAKIM", "MAKTK", "MANAS", "MARKA", "MAVI", "MEDTR", "MEGAP", "MEGMT",
     "MEPET", "MERCN", "MERIT", "MERKO", "METRO", "METUR", "MHRGY", "MIATK", "MIPAZ", "MMCAS",
-    "MNDTR", "MOBTL", "MOGAN", "MPARK", "MRGYO", "MRSHL", "MSGYO", "MTRKS", "MTRYO", "MZHLD",
-    "NATEN", "NETAS", "NIBAS", "NTHOL", "NUGYO", "NUHCM", "OBAMS", "OBASE", "ODAS", "OFCAD",
-    "OFSYM", "ONCSM", "ORCA", "ORGE", "ORMA", "OSMEN", "OSTIM", "OTKAR", "OTTO", "OYAKC",
-    "OYAYO", "OYLUM", "OYYAT", "OZKGY", "OZRDN", "OZSUB", "PAGYO", "PAMEL", "PAPIL", "PARSN",
-    "PASEU", "PATEK", "PCILT", "PEKGY", "PENTN", "PENTA", "PETKM", "PETUN", "PGSUS", "PINAR",
-    "PKENT", "PKART", "PLTUR", "PNLSN", "PNSUT", "POLHO", "POLTK", "PRDGS", "PRKAB", "PRKME",
-    "PRZMA", "PSDTC", "PSGYO", "QUAGR", "RALYH", "RAYSG", "REEDR", "RGYAS", "RHEAG", "RISE",
-    "RNPOL", "RODRG", "ROYAL", "RUBNS", "RYGYO", "RYSAS", "SAHOL", "SAMAT", "SANEL", "SANFM",
-    "SANKO", "SARKY", "SASA", "SAYAS", "SDTTR", "SEGMN", "SEKFK", "SEKUR", "SELEC", "SELVA",
-    "SEYKM", "SILVR", "SISE", "SKBNK", "SKTAS", "SMART", "SMRTG", "SMRVA", "SODSN", "SOKE",
-    "SOKM", "SONME", "SRVGY", "SUMAS", "SUNTK", "SURGY", "SUWEN", "TABGD", "TARKM", "TATEN",
-    "TATGD", "TAVHL", "TBORG", "TCELL", "TDGYO", "TEKTN", "TERA", "TETMT", "TEZOL", "TGSAS",
-    "THYAO", "TIRE", "TKFEN", "TKNSA", "TLMAN", "TMPOL", "TMSN", "TNZTP", "TOASO", "TRGYO",
-    "TRILC", "TSKB", "TSPOR", "TUCLK", "TUPRS", "TUREKS", "TURGG", "TURSG", "UFUK", "ULAS",
-    "ULKER", "ULUFA", "ULUSE", "UNLU", "USAK", "VAKBN", "VAKFN", "VAKKO", "VAPOR", "VERUS",
-    "VESBE", "VESTL", "VKFYO", "VKGYO", "YAPRK", "YATAS", "YAYLA", "YEOTK", "YGGYO", "YGYO",
-    "YKBNK", "YNKGY", "YONGA", "YBTAS", "YUYAT", "YYLGD", "ZEDUR", "ZOREN", "ZRGYO"
+    "MNDTR", "MOBTL", "MOGAN", "MPARK", "MRGYO", "MRSHL", "MSGYO", "MTRKS", "MTRYO", "NATEN",
+    "NETAS", "NIBAS", "NTHOL", "NUGYO", "NUHCM", "OBAMS", "OBASE", "ODAS", "OFSYM", "ONCSM",
+    "ORGE", "ORMA", "OSMEN", "OSTIM", "OTKAR", "OTTO", "OYAKC", "OYAYO", "OYLUM", "OYYAT",
+    "OZKGY", "OZRDN", "OZSUB", "PAGYO", "PAMEL", "PAPIL", "PARSN", "PASEU", "PATEK", "PCILT",
+    "PEKGY", "PENTA", "PETKM", "PETUN", "PGSUS", "PINAR", "PKENT", "PKART", "PLTUR", "PNLSN",
+    "PNSUT", "POLHO", "POLTK", "PRDGS", "PRKAB", "PRKME", "PRZMA", "PSDTC", "PSGYO", "QUAGR",
+    "RALYH", "RAYSG", "REEDR", "RGYAS", "RHEAG", "RNPOL", "RODRG", "ROYAL", "RUBNS", "RYGYO",
+    "RYSAS", "SAHOL", "SAMAT", "SANEL", "SANFM", "SANKO", "SARKY", "SASA", "SAYAS", "SDTTR",
+    "SEGMN", "SEKFK", "SEKUR", "SELEC", "SELVA", "SEYKM", "SILVR", "SISE", "SKBNK", "SKTAS",
+    "SMART", "SMRTG", "SODSN", "SOKE", "SOKM", "SONME", "SRVGY", "SUMAS", "SUNTK", "SURGY",
+    "SUWEN", "TABGD", "TARKM", "TATEN", "TATGD", "TAVHL", "TBORG", "TCELL", "TDGYO", "TEKTN",
+    "TERA", "TETMT", "TEZOL", "TGSAS", "THYAO", "TIRE", "TKFEN", "TKNSA", "TLMAN", "TMPOL",
+    "TMSN", "TNZTP", "TOASO", "TRGYO", "TRILC", "TSKB", "TSPOR", "TUCLK", "TUPRS", "TUREKS",
+    "TURGG", "TURSG", "UFUK", "ULAS", "ULKER", "ULUFA", "ULUSE", "UNLU", "USAK", "VAKBN",
+    "VAKFN", "VAKKO", "VERUS", "VESBE", "VESTL", "VKFYO", "VKGYO", "YAPRK", "YATAS", "YAYLA",
+    "YEOTK", "YGGYO", "YGYO", "YKBNK", "YNKGY", "YONGA", "YYLGD", "ZEDUR", "ZOREN", "ZRGYO"
 ]
 
 def send_telegram_msg(message):
@@ -164,6 +167,47 @@ def analyze_tv_stock(symbol):
     except Exception:
         return None
 
+def analyze_tv_crypto(symbol):
+    try:
+        handler = TA_Handler(
+            symbol=symbol,
+            screener="crypto",
+            exchange="BINANCE",
+            interval=Interval.INTERVAL_1_DAY
+        )
+        analysis = handler.get_analysis()
+        ind = analysis.indicators
+        return {
+            "close": ind.get("close"),
+            "change": ind.get("change"),
+            "rsi": ind.get("RSI"),
+            "recommendation": analysis.summary.get("RECOMMENDATION")
+        }
+    except Exception:
+        return None
+
+def scan_crypto():
+    found_count = 0
+    for coin in CRYPTO_LIST:
+        data = analyze_tv_crypto(coin)
+        if not data or data["rsi"] is None or data["close"] is None:
+            continue
+            
+        price = data["close"]
+        rsi = data["rsi"]
+        change = data["change"] or 0.0
+        rec = data["recommendation"] or "N/A"
+
+        if rsi <= 30:
+            send_telegram_msg(f"🪙 <b>[KRİPTO DİP AVCISI]</b>\n<b>#{coin}</b> - ${price:.4f} (%{change:+.2f}) | RSI: {rsi:.1f}")
+            found_count += 1
+        elif rsi >= 65 and change >= 4.0 and rec in ["STRONG_BUY", "BUY"]:
+            send_telegram_msg(f"⚡ <b>[KRİPTO MOMENTUM]</b>\n<b>#{coin}</b> - ${price:.4f} (%{change:+.2f}) | RSI: {rsi:.1f}")
+            found_count += 1
+
+        time.sleep(0.05)
+    return found_count
+
 def check_kap_news():
     global PROCESSED_KAP_LINKS, EVENING_KAP_NEWS
     try:
@@ -212,7 +256,8 @@ def check_kap_news():
 
 def scan_bist_stocks(symbol_list, scan_time):
     global CANDIDATES_1745
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {scan_time} Taraması...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {scan_time} BİST Taraması...")
+    found_count = 0
 
     if scan_time == "17:45":
         CANDIDATES_1745.clear()
@@ -234,14 +279,19 @@ def scan_bist_stocks(symbol_list, scan_time):
                 "rsi": rsi,
                 "rec": rec
             }
+            found_count += 1
 
         elif scan_time != "17:45":
             if rsi <= 30:
-                send_telegram_msg(f"🛡️ <b>[DİP AVCISI - {scan_time}]</b>\n<b>#{symbol}</b> - {price:.2f} TL (%{change:+.2f}) | RSI: {rsi:.1f}")
+                send_telegram_msg(f"🛡️ <b>[BİST DİP AVCISI - {scan_time}]</b>\n<b>#{symbol}</b> - {price:.2f} TL (%{change:+.2f}) | RSI: {rsi:.1f}")
+                found_count += 1
             elif rsi >= 50 and change >= 2.5 and rec in ["STRONG_BUY", "BUY"]:
-                send_telegram_msg(f"🚀 <b>[MOMENTUM - {scan_time}]</b>\n<b>#{symbol}</b> - {price:.2f} TL (%{change:+.2f}) | RSI: {rsi:.1f}")
+                send_telegram_msg(f"🚀 <b>[BİST MOMENTUM - {scan_time}]</b>\n<b>#{symbol}</b> - {price:.2f} TL (%{change:+.2f}) | RSI: {rsi:.1f}")
+                found_count += 1
 
         time.sleep(0.04)
+        
+    return found_count
 
 def generate_2300_final_report():
     global CANDIDATES_1745, EVENING_KAP_NEWS
@@ -283,14 +333,34 @@ def generate_2300_final_report():
     EVENING_KAP_NEWS.clear()
 
 def main():
-    send_telegram_msg("🤖 <b>BİST TAVAN ADAYI VE KAP ANALİZ BOTU AKTİF!</b>\n⏰ Seans Taramaları: <b>09:50</b>, <b>10:10</b>, <b>17:45</b>\n🌙 Akşam KAP Analiz Raporu: <b>23:00</b>")
-    
-    # Açılış kontrol taraması
+    send_telegram_msg(
+        "🤖 <b>BİST + KRİPTO + KAP ANALİZ BOTU AKTİF!</b>\n"
+        "⏰ BİST Taramaları: <b>09:50</b>, <b>10:10</b>, <b>17:45</b>\n"
+        "🪙 Kripto Takibi: <b>Aktif</b>\n"
+        "🌙 Akşam KAP Analiz Raporu: <b>23:00</b>"
+    )
+
+    # İlk Başlatma Taramaları (BİST + KRİPTO)
     try:
+        send_telegram_msg("🔍 <b>[İLK BAŞLATMA TARAMASI BAŞLADI]</b>\nBİST hisseleri ve Kripto piyasası taranıyor...")
+        
+        # 1. Kripto Taraması
+        crypto_found = scan_crypto()
+        
+        # 2. BİST Taraması
         init_symbols = get_all_bist_tickers()
-        scan_bist_stocks(init_symbols, "AÇILIŞ KONTROLÜ")
+        bist_found = scan_bist_stocks(init_symbols, "AÇILIŞ KONTROLÜ")
+        
+        send_telegram_msg(
+            f"✅ <b>[İLK BAŞLATMA TARAMASI BİTTİ]</b>\n"
+            f"• Tespit Edilen BİST Sinyali: <b>{bist_found}</b> Adet\n"
+            f"• Tespit Edilen Kripto Sinyali: <b>{crypto_found}</b> Adet"
+        )
     except Exception as e:
         print(f"Açılış tarama hatası: {e}")
+        send_telegram_msg(f"⚠️ <b>İlkleme Taraması Hatası:</b> {e}")
+
+    last_crypto_scan_time = 0
 
     while True:
         try:
@@ -298,19 +368,29 @@ def main():
             current_time = now.strftime("%H:%M")
             current_date = now.strftime("%Y-%m-%d")
 
+            # KAP Haberlerini Anlık Kontrol Et
             check_kap_news()
+
+            # Kripto Taramasını Her 30 Dakikada Bir Otomatik Çalıştır
+            if time.time() - last_crypto_scan_time > 1800:
+                scan_crypto()
+                last_crypto_scan_time = time.time()
 
             scan_key = f"{current_date}_{current_time}"
 
+            # BİST Zamanlı Taramalar (09:50, 10:10, 17:45)
             if current_time in TARGET_SCAN_TIMES and scan_key not in SCANNED_TIMES_TODAY:
                 symbols = get_all_bist_tickers()
                 if current_time == "17:45":
                     send_telegram_msg("⏰ <b>[17:45 KAPANIŞ TARAMASI BAŞLADI]</b>\n%5 - %9.99 arası primli yan tahtalar akşam analizi için hafızaya alınıyor...")
+                
                 scan_bist_stocks(symbols, current_time)
                 SCANNED_TIMES_TODAY.add(scan_key)
+                
                 if current_time == "17:45":
                     send_telegram_msg(f"✅ <b>[17:45 TARAMASI BİTTİ]</b>\nToplam <b>{len(CANDIDATES_1745)}</b> adet %5-%9.99 arası hisse 23:00 raporu için takibe alındı.")
 
+            # 23:00 Raporu
             if current_time == "23:00" and scan_key not in SCANNED_TIMES_TODAY:
                 generate_2300_final_report()
                 SCANNED_TIMES_TODAY.add(scan_key)
