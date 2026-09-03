@@ -13,12 +13,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 try:
     import requests
     import feedparser
+    import yfinance as yf  # BİLANÇO VE DEFTER DEĞERİ İÇİN
     from tradingview_ta import Interval, get_multiple_analysis
     from gtts import gTTS  # BOTA KONUŞMA YETENEĞİ VEREN KÜTÜPHANE
 except ModuleNotFoundError as e:
     print(f"\n❌ EKSİK KÜTÜPHANE TESPİT EDİLDİ: {e}")
     print("👉 Lütfen terminale şu komutu yazarak gerekli paketleri yükleyin:")
-    print("pip install requests feedparser tradingview-ta gTTS\n")
+    print("pip install requests feedparser tradingview-ta gTTS yfinance\n")
     exit(1)
 
 # ============================================================
@@ -151,25 +152,21 @@ def send_telegram_msg(message):
     except Exception:
         pass
 
-# 🎙️ BOTA KONUŞMA YETENEĞİ VEREN FONKSİYON
 def send_telegram_voice(text_to_speak):
     if TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN" or not TELEGRAM_BOT_TOKEN:
         print(f"\n[SESLİ UYARI ÇALINIYOR]: {text_to_speak}\n")
         return
     try:
-        # Metni Türkçe sese çevir ve kaydet
         tts = gTTS(text=text_to_speak, lang='tr')
         audio_filename = "uyari_sesi.ogg"
         tts.save(audio_filename)
         
-        # Telegrama Sesli Mesaj (Voice Note) olarak gönder
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice"
         payload = {"chat_id": TELEGRAM_CHAT_ID}
         with open(audio_filename, "rb") as audio_file:
             files = {"voice": audio_file}
             requests.post(url, data=payload, files=files, timeout=15)
             
-        # Gönderdikten sonra kalabalık yapmasın diye dosyayı sil
         if os.path.exists(audio_filename):
             os.remove(audio_filename)
     except Exception as e:
@@ -188,6 +185,44 @@ def get_all_bist_tickers():
     except Exception:
         pass
     return sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
+
+# ============================================================
+# UZUN VADE: DEFTER DEĞERİ DÜŞÜK & KAR EDENLERİ TARAMA
+# ============================================================
+def scan_long_term_stocks(symbol_list):
+    send_telegram_msg("📊 <b>[UZUN VADE]</b> Defter değeri uygun ve kar eden şirketler taranıyor...")
+    long_term_candidates = []
+    
+    # Süreci hızlandırmak için örnek bir alt küme veya liste kontrolü (yfinance performans amaçlı ilk 150 hisse taranır)
+    for symbol in symbol_list[:150]:
+        try:
+            ticker = yf.Ticker(f"{symbol}.IS")
+            info = ticker.info
+            
+            pb_ratio = info.get("priceToBook")
+            net_income = info.get("netIncomeToCommon")
+            
+            # Kriter: Defter değeri (PD/DD) 0 ile 2.5 arasında VE net kar pozitif (zarar etmemiş)
+            if pb_ratio and net_income:
+                if 0.1 <= pb_ratio <= 2.5 and net_income > 0:
+                    current_price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+                    long_term_candidates.append({
+                        "symbol": symbol,
+                        "pb": pb_ratio,
+                        "price": current_price
+                    })
+        except Exception:
+            continue
+            
+    if long_term_candidates:
+        # PD/DD oranına göre en ucuzdan en pahalıya sırala
+        long_term_candidates.sort(key=lambda x: x["pb"])
+        msg = "💎 <b>UZUN VADELİ YATIRIM ADAYLARI (Düşük PD/DD & Karlı)</b>\n\n"
+        for item in long_term_candidates[:10]: # En iyi 10 tanesini göster
+            msg += f"📌 <b>#{item['symbol']}</b> | Fiyat: {item['price']} TL | <b>PD/DD:</b> {item['pb']:.2f}\n"
+        send_telegram_msg(msg)
+    else:
+        send_telegram_msg("🛡️ <b>[UZUN VADE]:</b> Bu taramada kriterlere tam uyan hisse bulunamadı.")
 
 # ============================================================
 # TRADINGVIEW TOPLU TARAMA
@@ -247,14 +282,14 @@ def check_kap_news():
         pass
 
 # ============================================================
-# ÖZEL SEANS TARAMASI KONTROLÜ
+# ÖZEL SEANS TARAMASI KONTROLÜ (GÜNLÜK TAVAN / VUR-KAÇ)
 # ============================================================
 def scan_bist_stocks(symbol_list, scan_time):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Taraması Başlatıldı ({scan_time})...")
     
     tv_data_map = analyze_tv_stocks_bulk(symbol_list)
     top_gainers = []
-    gece_bulteni_adaylari = []
+    tavan_adaylari = []
 
     for symbol in symbol_list:
         data = tv_data_map.get(symbol)
@@ -266,11 +301,10 @@ def scan_bist_stocks(symbol_list, scan_time):
         change = data["change"] or 0.0
         volume = data["volume"] or 0
 
-        # LİSTE İÇİN: +%5 VE ÜZERİ YÜKSELENLER (Gün İçi)
-        if change >= TOP_GAINER_LIMIT and scan_time != "23:00":
+        if change >= TOP_GAINER_LIMIT:
             top_gainers.append((symbol, change, price, volume))
 
-        # 💎 STRATEJİ: %5 ile %8 Arası + (Dinamik Az Lot VEYA KAP Haberi)
+        # 🚀 GÜNLÜK VUR-KAÇ / TAVAN ADAYI STRATEJİSİ (%5 - %8 + Az Lot Veya KAP)
         if 5.0 <= change <= 8.0:
             is_low_volume = (0 < volume < LOW_VOLUME_LIMIT)
             has_kap = symbol in ACTIVE_KAP_SIGNALS
@@ -281,7 +315,7 @@ def scan_bist_stocks(symbol_list, scan_time):
                 
                 if is_low_volume and has_kap:
                     kap_data = ACTIVE_KAP_SIGNALS[symbol]
-                    rating = f"⭐⭐⭐⭐⭐ (Mükemmel Kombinasyon)"
+                    rating = "⭐⭐⭐⭐⭐ (Mükemmel Kombinasyon)"
                     strategy_desc = f"Lotu Az + {kap_data['category']} Haberi."
                 elif has_kap:
                     kap_data = ACTIVE_KAP_SIGNALS[symbol]
@@ -289,30 +323,16 @@ def scan_bist_stocks(symbol_list, scan_time):
                     strategy_desc = f"{kap_data['category']} haberi destekli."
                 elif is_low_volume:
                     rating = "⭐⭐⭐⭐ (Sığ Tahta / Az Lot İvmesi)"
-                    strategy_desc = f"Az lot işlem görüyor. Kademeler hızlı kalkabilir."
+                    strategy_desc = "Az lot işlem görüyor. Kademeler hızlı kalkabilir."
                 
-                # EĞER SAAT 23:00 İSE LİSTEYE EKLE, DEĞİLSE ANINDA GÖNDER
-                if scan_time == "23:00":
-                    gece_bulteni_adaylari.append({
-                        "symbol": symbol, "price": price, "change": change, 
-                        "volume": volume, "rating": rating, "strategy": strategy_desc,
-                        "has_kap": has_kap
-                    })
-                else:
-                    msg = (
-                        f"🚨 <b>[SİNYAL YAKALANDI - {scan_time}]</b> 🚨\n\n"
-                        f"<b>Hisse Adı:</b> #{symbol}\n"
-                        f"<b>Fiyat:</b> {price:.2f} TL (<b>%{change:+.2f}</b>)\n"
-                        f"<b>Hacim:</b> {volume:,.0f} Lot\n"
-                        f"<b>Derece:</b> {rating}\n"
-                        f"<b>Strateji:</b> {strategy_desc}\n"
-                    )
-                    if has_kap:
-                        msg += f"🔗 <a href='{ACTIVE_KAP_SIGNALS[symbol]['link']}'>Habere Git</a>"
-                    send_telegram_msg(msg)
+                tavan_adaylari.append({
+                    "symbol": symbol, "price": price, "change": change, 
+                    "volume": volume, "rating": rating, "strategy": strategy_desc,
+                    "has_kap": has_kap
+                })
 
         # 🛡️ DİP AVCISI
-        if rsi <= RSI_DIP_LIMIT and scan_time != "23:00":
+        if rsi <= RSI_DIP_LIMIT:
             dip_stars = "⭐⭐⭐⭐⭐" if rsi <= 15 else "⭐⭐⭐⭐" if rsi <= 20 else "⭐⭐⭐"
             send_telegram_msg(
                 f"🛡️ <b>[DİP AVCISI - {scan_time}]</b>\n\n"
@@ -322,22 +342,24 @@ def scan_bist_stocks(symbol_list, scan_time):
                 f"<b>RSI (14):</b> {rsi:.1f}"
             )
 
-    # 🌙 23:00 GECE BÜLTENİ
-    if scan_time == "23:00":
-        if gece_bulteni_adaylari:
-            gece_bulteni_adaylari.sort(key=lambda x: x["change"], reverse=True)
-            bulten_msg = "🌙 <b>GECE BÜLTENİ: YARININ TAVAN ADAYLARI</b>\n\n"
-            for aday in gece_bulteni_adaylari:
-                bulten_msg += f"🚀 <b>#{aday['symbol']}</b> | {aday['price']:.2f} TL (<b>%{aday['change']:+.2f}</b>)\n"
-                bulten_msg += f"   ├ <b>Lot:</b> {aday['volume']:,.0f}\n"
-                bulten_msg += f"   └ <b>Sebep:</b> {aday['strategy']}\n"
-            bulten_msg += "\n📌 <i>Bol kazançlı bir gün dilerim. Yatırım tavsiyesi değildir.</i>"
-            send_telegram_msg(bulten_msg)
-        else:
-            send_telegram_msg("🌙 <b>GECE BÜLTENİ:</b> Bugün tavan adayı kriteri sağlanamadı.")
+    # 🚀 GÜNLÜK TAVAN ADAYLARINI ANINDA GÖNDER
+    if tavan_adaylari:
+        tavan_adaylari.sort(key=lambda x: x["change"], reverse=True)
+        for aday in tavan_adaylari:
+            msg = (
+                f"🚨 <b>[GÜNLÜK TAVAN ADAYI - {scan_time}]</b> 🚨\n\n"
+                f"<b>Hisse Adı:</b> #{aday['symbol']}\n"
+                f"<b>Fiyat:</b> {aday['price']:.2f} TL (<b>%{aday['change']:+.2f}</b>)\n"
+                f"<b>Hacim:</b> {aday['volume']:,.0f} Lot\n"
+                f"<b>Derece:</b> {aday['rating']}\n"
+                f"<b>Strateji:</b> {aday['strategy']}\n"
+            )
+            if aday['has_kap']:
+                msg += f"🔗 <a href='{ACTIVE_KAP_SIGNALS[aday['symbol']]['link']}'>Habere Git</a>"
+            send_telegram_msg(msg)
 
-    # 📊 +%5 GÜN İÇİ LİSTESİ
-    if top_gainers and scan_time != "23:00":
+    # 📊 +%5 GÜN İÇİ YÜKSELENLER LİSTESİ
+    if top_gainers:
         top_gainers.sort(key=lambda x: x[1], reverse=True)
         chunk_size = 30
         for i in range(0, len(top_gainers), chunk_size):
@@ -351,26 +373,30 @@ def scan_bist_stocks(symbol_list, scan_time):
 # ANA ÇALIŞMA DÖNGÜSÜ
 # ============================================================
 def main():
-    # 1. Bota Güç Verildiği An İlk Bildirim
     now = datetime.now()
     current_time_str = now.strftime("%H:%M")
     
     send_telegram_msg(
-        "🤖 <b>BİST BOTU BAŞLATILDI</b>\n"
-        "⏰ Gün İçi: <b>09:50, 10:10, 17:45</b> | Gece: <b>23:00</b>\n"
-        "🚀 <i>Sistemin çalıştığını teyit etmek için anlık piyasa taranıyor... Lütfen bekleyin.</i>"
+        "🤖 <b>BİST ÇİFT STRATEJİ BOTU BAŞLATILDI</b>\n"
+        "💎 <i>Uzun Vade (Düşük PD/DD & Karlı) + Günlük Tavan Adayları Aktif!</i>\n"
+        "🚀 İlk açılış taraması ve uzun vade analizi yapılıyor..."
     )
 
-    # 2. RENDER / İLK AÇILIŞ TARAMASI (Saati beklemeden anında çalışır)
+    # 1. İLK AÇILIŞTA UZUN VADE VE ANLIK PİYASA TARAMASI
     try:
         check_kap_news()
         hedef_hisseler = get_all_bist_tickers()
+        
+        # Uzun vadeli ucuz ve karlı hisseleri ilk açılışta bul
+        scan_long_term_stocks(hedef_hisseler)
+        
+        # Günlük tavan/teknik taramayı başlat
         scan_bist_stocks(hedef_hisseler, f"İLK AÇILIŞ ({current_time_str})")
-        send_telegram_msg("✅ <b>Açılış taraması tamamlandı!</b> Bot hata vermeden çalışıyor. Artık uyku moduna geçip alarm saatlerini bekleyecek.")
+        send_telegram_msg("✅ <b>Açılış taramaları tamamlandı!</b> Bot artık alarm saatlerini bekliyor.")
     except Exception as e:
         send_telegram_msg(f"❌ <b>İlk Taramada Hata:</b> {e}")
 
-    # 3. STANDART ALARM SAATLERİNİ BEKLEME DÖNGÜSÜ
+    # 2. STANDART ALARM SAATLERİNİ BEKLEME DÖNGÜSÜ
     while True:
         try:
             loop_now = datetime.now()
@@ -382,13 +408,18 @@ def main():
 
             if loop_time in TARGET_SCAN_TIMES and scan_key not in SCANNED_TIMES_TODAY:
                 
-                # 🎙️ 09:50'ye ÖZEL SESLİ UYARI VE SİRENLİ MESAJ
+                # 🎙️ 09:50 SESLİ UYARI
                 if loop_time == "09:50":
-                    send_telegram_msg("🚨 <b>DİKKAT: PİYASA AÇILDI!</b> 🚨\nSinyal taraması başlatılıyor...")
-                    send_telegram_voice("Piyasa açıldı.") # SADECE PİYASA AÇILDI DİYOR
-                    time.sleep(2) # Mesajların sana ulaşması için kısa bir bekleme
+                    send_telegram_msg("🚨 <b>DİKKAT: PİYASA AÇILDI!</b> 🚨\nTavan adayları taranıyor...")
+                    send_telegram_voice("Piyasa açıldı.")
+                    time.sleep(2)
                     
                 hedef_hisseler = get_all_bist_tickers()
+                
+                # Gece 23:00'te hem uzun vade hem gece bülteni çalışsın
+                if loop_time == "23:00":
+                    scan_long_term_stocks(hedef_hisseler)
+                    
                 scan_bist_stocks(hedef_hisseler, loop_time)
                 SCANNED_TIMES_TODAY.add(scan_key)
                 
