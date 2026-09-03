@@ -3,25 +3,41 @@
 
 import os
 import time
-import html
+import threading
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 import feedparser
-from datetime import datetime
-from tradingview_ta import TA_Handler, Interval
+from tradingview_ta import get_multiple_analysis, Interval
 
 # ============================================================
-# TELEGRAM
+# SUNUCU & RENDER UPTIME SERVISI (Port 10000 - GET & HEAD Tam Desteği)
 # ============================================================
-# Güvenlik: gerçek tokenı kod içine yazmak yerine ortam değişkeni kullan.
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"BIST Full Star Scanner Bot Active!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = ThreadingHTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"Health Check sunucusu {port} portunda aktif dinlemede...", flush=True)
+    server.serve_forever()
 
 # ============================================================
-# TARAMA AYARLARI
+# PARAMETRELER VE LİSTELER
 # ============================================================
-SCAN_MINUTES = 15
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
-# Artık BIST 30 da taranıyor.
 BIST_30_SET = {
     "AKBNK", "ALARK", "ASELS", "ASTOR", "BIMAS", "BRSAN", "DOAS", "EKGYO",
     "ENKAI", "EREGL", "FROTO", "GARAN", "GUBRF", "HEKTS", "ISCTR", "KCHOL",
@@ -29,415 +45,385 @@ BIST_30_SET = {
     "SASA", "SISE", "TCELL", "THYAO", "TOASO", "TUPRS"
 }
 
-TARGET_STOCKS = [
-    "MAGEN", "ALFAS", "EUPWR", "CWENE", "MIATK", "SMRTG", "SDTTR", "REEDR",
-    "GESAN", "PENTA", "YEOTK", "KOTON", "AGROT", "TABGD", "FORTE", "ATAKP",
-    "GOKNR", "BINBN", "ENERY", "TETMT", "MOBTL", "BARMA", "KBORU", "KAYSE",
-    "CVMEK", "BOBET", "PLTUR"
-]
+TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45"]
 
-ALL_STOCKS = sorted(BIST_30_SET | set(TARGET_STOCKS))
+CANDIDATES_1745 = {}   
+LATEST_KAP_NEWS = {}   
+PROCESSED_KAP_LINKS = set()
+SCANNED_TIMES_TODAY = set()
+IS_BOT_STARTED = False
+BIST_FUNDAMENTALS = {} 
 
-# ============================================================
-# STRATEJİ PARAMETRELERİ
-# ============================================================
-RSI_DIP_LIMIT = 30
-RSI_DEEP_DIP = 25
-
-RSI_MOMENTUM_MIN = 55
-CHANGE_MOMENTUM_MIN = 2.0
-
-# Hacim / ortalama hacim oranı
-VOLUME_SPIKE_MIN = 1.20
-VOLUME_STRONG_MIN = 1.80
-
-# Çoklu zaman dilimi
-TIMEFRAMES = {
-    "1H": Interval.INTERVAL_1_HOUR,
-    "4H": Interval.INTERVAL_4_HOURS,
-    "1D": Interval.INTERVAL_1_DAY,
+KAP_STAR_MAP = {
+    "bedelsiz": ("⭐⭐⭐⭐⭐", "Bedelsiz / Sermaye Artırımı"),
+    "yeni iş ilişkisi": ("⭐⭐⭐⭐⭐", "Yeni İş İlişkisi / İhale"),
+    "ortaklık": ("⭐⭐⭐⭐⭐", "Stratejik Ortaklık"),
+    "ihale": ("⭐⭐⭐⭐", "İhale Sözleşmesi"),
+    "pay alım": ("⭐⭐⭐⭐", "Şirket Pay Geri Alımı")
 }
 
-# Aynı hisse için aynı sinyali tekrar tekrar Telegram'a göndermeyi azaltır.
-LAST_ALERTS = {}
+FULL_BIST_LIST = [
+    "AAVTUR", "ACSEL", "ADEL", "ADESE", "ADGYO", "AEFES", "AFYON", "AGESA", "AGHOL", "AGROT",
+    "AHGAZ", "AKBNK", "AKCNS", "AKFGY", "AKFYE", "AKMGY", "AKSA", "AKSEN", "AKSGY", "AKSUE",
+    "ALARK", "ALBRK", "ALCAR", "ALCTL", "ALFAS", "ALGYO", "ALKA", "ALKIM", "ALMAD", "ALTNY",
+    "ALVES", "ANELE", "ANGEN", "ANHYT", "ANSGR", "ARASE", "ARCLK", "ARDYZ", "ARENA", "ARSAN",
+    "ARTMS", "ARZUM", "ASELS", "ASGYO", "ASTOR", "ASUZU", "ATAGY", "ATAKP", "ATATP", "ATEKS",
+    "AVGYO", "AVHOL", "AVOD", "AYCES", "AYDEM", "AYEN", "AYGAZ", "AZTEK", "BAGFS", "BAKAB",
+    "BANVT", "BARMA", "BATIS", "BTCIM", "BYDNR", "BEGYO", "BERA", "BEYAZ", "BFREN", "BIENP",
+    "BIGCHE", "BIMAS", "BINBN", "BIOEN", "BIZIM", "BJKAS", "BLCYO", "BMTKS", "BNTAS", "BOBET",
+    "BORLS", "BORSK", "BOSSA", "BRCVN", "BRISA", "BRKO", "BRKSN", "BRSAN", "BRYAT", "BSOKE",
+    "BUCIM", "BURCE", "BURVA", "BVSAN", "CANTE", "CCOLA", "CELHA", "CEMAS", "CEMTS", "CMBTN",
+    "CONSE", "COSMO", "CRDFA", "CRFSA", "CUSAN", "CVMEK", "CWENE", "DAGI", "DAPGM", "DARDL",
+    "DGATE", "DGGYO", "DITAS", "DMRGD", "DMSAS", "DNISI", "DOAS", "DOBUR", "DOCTA", "DOGUB",
+    "DOHOL", "DURDO", "DYOBY", "EDATA", "EDIP", "EGEEN", "EGEPO", "EGGUB", "EGPRO", "EGSER",
+    "EKGYO", "EKOS", "EKSUN", "ELITE", "EMKEL", "ENERY", "ENKAI", "ENSRI", "EPLAS", "ERCB",
+    "EREGL", "ERSU", "ESCAR", "ESCOM", "ESEN", "ETILR", "EUPWR", "EYGYO", "FADE", "FENER",
+    "FLAP", "FMIZP", "FONET", "FORTE", "FORMT", "FRIGO", "FROTO", "FZLGY", "GARAN", "GARFA",
+    "GEDIK", "GEDZA", "GENKE", "GENTS", "GEREL", "GESAN", "GIPTA", "GLBMD", "GLYHO", "GMTAS",
+    "GOKNR", "GOLTS", "GOODY", "GOZDE", "GRSEL", "GRTRK", "GSDHO", "GSDDE", "GSRAY", "GUBRF",
+    "GWIND", "HALKB", "HATEK", "HATSN", "HDFGS", "HEDEF", "HEKTS", "HKTM", "HLGYO", "HOROZ",
+    "HUBVC", "HUNER", "HURGZ", "ICBCT", "IDEAS", "IDGYO", "IEYHO", "IHAAS", "IHEVA", "IHGZT",
+    "IHLGM", "IHLAS", "INGRM", "INTEM", "INVEO", "INVES", "IPEKE", "ISATR", "ISBTR", "ISCTR",
+    "ISDMR", "ISFIN", "ISGSY", "ISGYO", "ISKPL", "ISMEN", "ISSEN", "IZMDC", "JANTS", "KAREL",
+    "KARSN", "KARTN", "KATMR", "KAYSE", "KBORU", "KCAER", "KCHOL", "KENT", "KRVGD", "KGYO",
+    "KIMMR", "KLGYO", "KLMSN", "KLNMA", "KLSER", "KLSYN", "KNFRT", "KONKA", "KONTR", "KONYA",
+    "KOTON", "KOZAL", "KOZAA", "KRDMD", "KRDMA", "KRDMB", "KRPLS", "KRSTL", "KRTEK", "KTLEV",
+    "KTSKR", "KUTPO", "LIDER", "LIDFA", "LINK", "LKMNH", "LMKDC", "LOGO", "LUKSK", "MAALT",
+    "MACKO", "MAGEN", "MAKIM", "MAKTK", "MANAS", "MARKA", "MAVI", "MEDTR", "MEGAP", "MEGMT",
+    "MEPET", "MERCN", "MERIT", "MERKO", "METRO", "METUR", "MHRGY", "MIATK", "MIPAZ", "MMCAS",
+    "MNDTR", "MOBTL", "MOGAN", "MPARK", "MRGYO", "MRSHL", "MSGYO", "MTRKS", "MTRYO", "NATEN",
+    "NETAS", "NIBAS", "NTHOL", "NUGYO", "NUHCM", "OBAMS", "OBASE", "ODAS", "OFSYM", "ONCSM",
+    "ORGE", "ORMA", "OSMEN", "OSTIM", "OTKAR", "OTTO", "OYAKC", "OYAYO", "OYLUM", "OYYAT",
+    "OZKGY", "OZRDN", "OZSUB", "PAGYO", "PAMEL", "PAPIL", "PARSN", "PASEU", "PATEK", "PCILT",
+    "PEKGY", "PENTA", "PETKM", "PETUN", "PGSUS", "PINAR", "PKENT", "PKART", "PLTUR", "PNLSN",
+    "PNSUT", "POLHO", "POLTK", "PRDGS", "PRKAB", "PRKME", "PRZMA", "PSDTC", "PSGYO", "QUAGR",
+    "RALYH", "RAYSG", "REEDR", "RGYAS", "RHEAG", "RNPOL", "RODRG", "ROYAL", "RUBNS", "RYGYO",
+    "RYSAS", "SAHOL", "SAMAT", "SANEL", "SANFM", "SANKO", "SARKY", "SASA", "SAYAS", "SDTTR",
+    "SEGMN", "SEKFK", "SEKUR", "SELEC", "SELVA", "SEYKM", "SILVR", "SISE", "SKBNK", "SKTAS",
+    "SMART", "SMRTG", "SODSN", "SOKE", "SOKM", "SONME", "SRVGY", "SUMAS", "SUNTK", "SURGY",
+    "SUWEN", "TABGD", "TARKM", "TATEN", "TATGD", "TAVHL", "TBORG", "TCELL", "TDGYO", "TEKTN",
+    "TERA", "TETMT", "TEZOL", "TGSAS", "THYAO", "TIRE", "TKFEN", "TKNSA", "TLMAN", "TMPOL",
+    "TMSN", "TNZTP", "TOASO", "TRGYO", "TRILC", "TSKB", "TSPOR", "TUCLK", "TUPRS", "TUREKS",
+    "TURGG", "TURSG", "UFUK", "ULAS", "ULKER", "ULUFA", "ULUSE", "UNLU", "USAK", "VAKBN",
+    "VAKFN", "VAKKO", "VERUS", "VESBE", "VESTL", "VKFYO", "VKGYO", "YAPRK", "YATAS", "YAYLA",
+    "YEOTK", "YGGYO", "YGYO", "YKBNK", "YNKGY", "YONGA", "YYLGD", "ZEDUR", "ZOREN", "ZRGYO"
+]
 
 # ============================================================
-# TELEGRAM
+# YARDIMCI FONKSİYONLAR
 # ============================================================
 def send_telegram_msg(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("\n[TELEGRAM KAPALI]\n" + message + "\n")
+    if TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN" or not TELEGRAM_BOT_TOKEN:
+        print(f"\n[TELEGRAM MESAJI]:\n{message}\n")
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True,
+        "disable_web_page_preview": True
     }
-
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-    except Exception as exc:
-        print(f"Telegram Gönderim Hatası: {exc}")
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Telegram Gönderim Hatası: {e}")
 
-
-def send_once(key, message, cooldown_minutes=60):
-    now = time.time()
-    last = LAST_ALERTS.get(key, 0)
-
-    if now - last >= cooldown_minutes * 60:
-        send_telegram_msg(message)
-        LAST_ALERTS[key] = now
-
-# ============================================================
-# TRADINGVIEW
-# ============================================================
-def analyze_tv_stock(symbol, interval):
+def fetch_is_yatirim_data():
+    """BİST Defter Değeri (PD/DD) Oranlarını Çeker (Yurt dışı IP korumalı)"""
+    global BIST_FUNDAMENTALS
     try:
-        handler = TA_Handler(
-            symbol=symbol,
-            screener="turkey",
-            exchange="BIST",
-            interval=interval,
-        )
+        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json().get('d', [])
+            for item in data:
+                code = item.get('code')
+                pddd = item.get('pd_dd')
+                if code and pddd is not None:
+                    try:
+                        BIST_FUNDAMENTALS[code] = float(pddd)
+                    except ValueError:
+                        pass
+    except Exception as e:
+        print(f"İş Yatırım Veri Çekme Uyarısı (Temel veriler olmadan devam ediliyor): {e}")
 
-        analysis = handler.get_analysis()
-        ind = analysis.indicators
-        summary = analysis.summary
+def get_all_bist_tickers():
+    fetch_is_yatirim_data()
+    if BIST_FUNDAMENTALS:
+        filtered = sorted(list(set(BIST_FUNDAMENTALS.keys()) - BIST_30_SET))
+        if len(filtered) >= 300:
+            return filtered
+    return sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
 
-        close = ind.get("close")
-        change = ind.get("change")
-        rsi = ind.get("RSI")
-        volume = ind.get("volume")
+def analyze_tv_stocks_bulk(symbol_list):
+    """TradingView API'den tüm hisseleri 50'li paketler halinde HIZLICA çeker."""
+    formatted_symbols = [f"BIST:{sym}" for sym in symbol_list]
+    results = {}
+    chunk_size = 50 
 
-        # TradingView bazı zaman dilimlerinde hacim ortalamasını farklı
-        # isimlerle döndürebilir. Bulunamazsa hacim oranı hesaplanmaz.
-        vol_ma20 = (
-            ind.get("volume_ma")
-            or ind.get("volume_sma")
-            or ind.get("Volume SMA")
-        )
-
-        volume_ratio = None
-        if volume is not None and vol_ma20 not in (None, 0):
-            volume_ratio = volume / vol_ma20
-
-        return {
-            "close": close,
-            "change": change,
-            "rsi": rsi,
-            "volume": volume,
-            "volume_ma20": vol_ma20,
-            "volume_ratio": volume_ratio,
-            "recommendation": summary.get("RECOMMENDATION", "N/A"),
-            "buy": summary.get("BUY", 0),
-            "sell": summary.get("SELL", 0),
-            "neutral": summary.get("NEUTRAL", 0),
-        }
-
-    except Exception as exc:
-        print(f"{symbol} {interval} veri hatası: {exc}")
-        return None
-
-
-def get_all_timeframes(symbol):
-    result = {}
-
-    for name, interval in TIMEFRAMES.items():
-        data = analyze_tv_stock(symbol, interval)
-        if data:
-            result[name] = data
-
-    return result
-
-# ============================================================
-# YARDIMCI
-# ============================================================
-def safe_float(value, default=0.0):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def recommendation_score(rec):
-    return {
-        "STRONG_BUY": 2,
-        "BUY": 1,
-        "NEUTRAL": 0,
-        "SELL": -1,
-        "STRONG_SELL": -2,
-    }.get(rec, 0)
-
-
-def volume_text(ratio):
-    if ratio is None:
-        return "Hacim oranı: veri yok"
-
-    if ratio >= VOLUME_STRONG_MIN:
-        return f"Hacim: {ratio:.2f}x ortalama 🔥"
-    if ratio >= VOLUME_SPIKE_MIN:
-        return f"Hacim: {ratio:.2f}x ortalama 📈"
-    return f"Hacim: {ratio:.2f}x ortalama"
-
-
-def momentum_score(data):
-    """
-    Tavan tahmini yerine puanlama yapılır.
-    Maksimum 10 puan:
-      +2 günlük RSI >= 55
-      +2 günlük değişim >= %2
-      +2 1H BUY/STRONG_BUY
-      +2 4H BUY/STRONG_BUY
-      +1 1D BUY/STRONG_BUY
-      +1 hacim >= 1.2x
-    """
-
-    d1 = data.get("1D")
-    h4 = data.get("4H")
-    h1 = data.get("1H")
-
-    if not d1:
-        return 0
-
-    score = 0
-
-    if safe_float(d1.get("rsi")) >= RSI_MOMENTUM_MIN:
-        score += 2
-
-    if safe_float(d1.get("change")) >= CHANGE_MOMENTUM_MIN:
-        score += 2
-
-    if h1 and recommendation_score(h1.get("recommendation")) > 0:
-        score += 2
-
-    if h4 and recommendation_score(h4.get("recommendation")) > 0:
-        score += 2
-
-    if recommendation_score(d1.get("recommendation")) > 0:
-        score += 1
-
-    ratio = d1.get("volume_ratio")
-    if ratio is not None and ratio >= VOLUME_SPIKE_MIN:
-        score += 1
-
-    return score
-
-
-def momentum_stars(score, volume_ratio):
-    if score >= 9 and volume_ratio is not None and volume_ratio >= VOLUME_STRONG_MIN:
-        return "⭐⭐⭐⭐⭐"
-    if score >= 8:
-        return "⭐⭐⭐⭐"
-    if score >= 6:
-        return "⭐⭐⭐"
-    if score >= 4:
-        return "⭐⭐"
-    return "⭐"
-
-
-def dip_stars(rsi):
-    if rsi <= 15:
-        return "⭐⭐⭐⭐⭐"
-    if rsi <= 20:
-        return "⭐⭐⭐⭐"
-    if rsi <= 25:
-        return "⭐⭐⭐"
-    return "⭐⭐"
-
-# ============================================================
-# KAP
-# ============================================================
-KAP_KEYWORDS = {
-    "bedelsiz": (5, "Bedelsiz / Sermaye Artırımı"),
-    "sermaye artır": (5, "Sermaye Artırımı"),
-    "yeni iş ilişkisi": (5, "Yeni İş İlişkisi"),
-    "iş ilişkisi": (4, "Yeni İş İlişkisi"),
-    "ortaklık": (5, "Ortaklık / Stratejik İş Birliği"),
-    "m&a": (5, "Birleşme / Satın Alma"),
-    "ihale": (4, "İhale"),
-    "sipariş": (4, "Sipariş"),
-    "pay alım": (4, "Pay Geri Alımı"),
-    "geri alım": (4, "Pay Geri Alımı"),
-    "sözleşme": (3, "Sözleşme"),
-}
-
-PROCESSED_KAP_LINKS = set()
-
-
-def kap_score(title, summary):
-    text = f"{title} {summary}".lower()
-    hits = []
-
-    for key, (score, category) in KAP_KEYWORDS.items():
-        if key in text:
-            hits.append((score, category))
-
-    if not hits:
-        return 0, []
-
-    # Aynı haber içinde tekrarlanan benzer kelimeler puanı sınırsız artırmasın.
-    best_by_category = {}
-    for score, category in hits:
-        best_by_category[category] = max(
-            best_by_category.get(category, 0), score
-        )
-
-    total = min(sum(best_by_category.values()), 10)
-    return total, list(best_by_category.items())
-
+    for i in range(0, len(formatted_symbols), chunk_size):
+        chunk = formatted_symbols[i:i + chunk_size]
+        try:
+            analysis_chunk = get_multiple_analysis(
+                screener="turkey",
+                interval=Interval.INTERVAL_1_DAY,
+                symbols=chunk
+            )
+            for key, analysis in analysis_chunk.items():
+                clean_sym = key.replace("BIST:", "")
+                if analysis and hasattr(analysis, 'indicators') and analysis.indicators:
+                    ind = analysis.indicators
+                    rec = analysis.summary.get("RECOMMENDATION") if hasattr(analysis, 'summary') and analysis.summary else "N/A"
+                    results[clean_sym] = {
+                        "close": ind.get("close"),
+                        "change": ind.get("change"),
+                        "rsi": ind.get("RSI"),
+                        "recommendation": rec
+                    }
+        except Exception as e:
+            print(f"TradingView Toplu Tarama Hatası (Paket {i}): {e}")
+            
+    return results
 
 def check_kap_news():
+    global PROCESSED_KAP_LINKS, LATEST_KAP_NEWS
     try:
         feed = feedparser.parse("https://www.kap.org.tr/tr/rss")
-
-        for entry in feed.entries[:30]:
-            link = getattr(entry, "link", "")
-            if not link or link in PROCESSED_KAP_LINKS:
+        for entry in feed.entries[:25]:
+            if entry.link in PROCESSED_KAP_LINKS:
                 continue
 
-            title = getattr(entry, "title", "")
-            summary = getattr(entry, "summary", "")
+            title = entry.title
+            summary = entry.summary if 'summary' in entry else ""
+            content = (title + " " + summary).lower()
 
-            score, categories = kap_score(title, summary)
+            for key, (stars, category) in KAP_STAR_MAP.items():
+                if key in content:
+                    PROCESSED_KAP_LINKS.add(entry.link)
+                    
+                    found_symbol = "GENEL"
+                    for sym in FULL_BIST_LIST:
+                        if f"#{sym.lower()}" in content or f" {sym.lower()} " in content:
+                            found_symbol = sym
+                            break
 
-            # Yalnızca anlamlı puanı olan haberleri bildir.
-            if score < 4:
-                continue
+                    LATEST_KAP_NEWS[found_symbol] = {
+                        "title": title,
+                        "stars": stars,
+                        "category": category,
+                        "link": entry.link
+                    }
 
-            PROCESSED_KAP_LINKS.add(link)
+                    msg = (
+                        f"🔥 <b>[YÜKSEK HABER DEĞERİ - KAP İSTİHBARATI]</b>\n\n"
+                        f"<b>Hisse:</b> #{found_symbol}\n"
+                        f"<b>Etki Gücü:</b> {stars}\n"
+                        f"<b>Kategori:</b> {category}\n"
+                        f"<b>Başlık:</b> {title}\n"
+                        f"<b>Link:</b> <a href='{entry.link}'>KAP Detay</a>"
+                    )
+                    send_telegram_msg(msg)
+                    break
+    except Exception as e:
+        print(f"KAP Hatası: {e}")
 
-            stars = "⭐" * min(5, max(1, (score + 1) // 2))
-            category_text = ", ".join(cat for _, cat in categories)
+def calculate_star_rating(change, rsi, pddd, kap_exists):
+    score = 1
+    if change >= 9.5:
+        score += 3
+    elif change >= 5.0:
+        score += 2
+    elif rsi <= 25:
+        score += 2
 
-            msg = (
-                f"📰 <b>KAP ÖNEMLİ HABER</b>\n\n"
-                f"<b>Etki:</b> {stars} ({score}/10)\n"
-                f"<b>Kategori:</b> {html.escape(category_text)}\n"
-                f"<b>Başlık:</b> {html.escape(title)}\n"
-                f"<a href='{html.escape(link, quote=True)}'>KAP Bildirim Detayı</a>"
-            )
+    if pddd is not None and pddd < 1.0:
+        score += 1
 
-            send_once(f"KAP:{link}", msg, cooldown_minutes=1440)
+    if kap_exists:
+        score += 1
 
-    except Exception as exc:
-        print(f"KAP Kontrol Hatası: {exc}")
+    score = min(score, 5)
+    return "⭐" * score
 
 # ============================================================
-# HİSSE TARAMA
+# TARAMA MODÜLÜ
 # ============================================================
-def scan_stock(symbol):
-    data = get_all_timeframes(symbol)
+def scan_bist_stocks(symbol_list, scan_tag):
+    global CANDIDATES_1745
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {scan_tag} Taraması Başladı...")
+    found_count = 0
 
-    if not data:
-        return
+    if scan_tag == "17:45":
+        CANDIDATES_1745.clear()
 
-    daily = data.get("1D")
-    if not daily or daily.get("close") is None or daily.get("rsi") is None:
-        return
+    # Toplu veri çekme çağrısı
+    tv_data_map = analyze_tv_stocks_bulk(symbol_list)
 
-    price = safe_float(daily.get("close"))
-    rsi = safe_float(daily.get("rsi"))
-    change = safe_float(daily.get("change"))
-    rec = daily.get("recommendation", "N/A")
-    volume_ratio = daily.get("volume_ratio")
+    for symbol in symbol_list:
+        data = tv_data_map.get(symbol)
+        if not data or data["rsi"] is None or data["close"] is None:
+            continue
 
-    # --------------------------------------------------------
-    # 1) DİP & DEĞER
-    # --------------------------------------------------------
-    if rsi <= RSI_DIP_LIMIT:
-        stars = dip_stars(rsi)
+        price = data["close"]
+        rsi = data["rsi"]
+        change = data["change"] or 0.0
+        rec = data["recommendation"] or "N/A"
+        pddd = BIST_FUNDAMENTALS.get(symbol, None)
+        kap_data = LATEST_KAP_NEWS.get(symbol, None)
 
-        msg = (
-            f"🛡️ <b>DİP & DEĞER ADAYI</b>\n\n"
-            f"<b>Hisse:</b> #{symbol}\n"
-            f"<b>Derece:</b> {stars}\n"
-            f"<b>Fiyat:</b> {price:.2f} TL\n"
-            f"<b>Günlük değişim:</b> %{change:+.2f}\n"
-            f"<b>RSI(14):</b> {rsi:.1f}\n"
-            f"<b>1D TV:</b> {rec}\n"
-            f"<b>{volume_text(volume_ratio)}</b>\n\n"
-            f"<b>Strateji:</b> Aşırı satım bölgesi; "
-            f"tek başına alım garantisi değildir."
+        pddd_str = f"{pddd:.2f}" if pddd is not None else "N/A"
+        if pddd is not None and pddd < 1.0:
+            pddd_str += " 💎 (Defter Değerinin Altında)"
+
+        star_str = calculate_star_rating(change, rsi, pddd, kap_data is not None)
+        kap_str = f"🔥 HABER VAR ({kap_data['category']})" if kap_data else "Yok"
+
+        # 17:45 KAPANIŞ HAFIZALAMA
+        if scan_tag == "17:45" and 5.0 <= change <= 9.99:
+            CANDIDATES_1745[symbol] = {
+                "price": price, "change": change, "rsi": rsi,
+                "rec": rec, "pddd": pddd_str, "kap": kap_str,
+                "stars": star_str
+            }
+            found_count += 1
+
+        elif scan_tag != "17:45":
+            # 1. TAVAN YAPAN HİSSELER (%9.5+)
+            if change >= 9.5:
+                msg = (
+                    f"🚀 <b>[TAVAN KİLİT - {scan_tag}]</b>\n\n"
+                    f"<b>Hisse Adı:</b> #{symbol}\n"
+                    f"<b>Derece:</b> {star_str}\n"
+                    f"<b>Fiyat / Değişim:</b> {price:.2f} TL (%{change:+.2f})\n"
+                    f"<b>RSI (14):</b> {rsi:.1f} | <b>PD/DD:</b> {pddd_str}\n"
+                    f"<b>KAP Haberi:</b> {kap_str}\n"
+                    f"<b>Strateji:</b> Tavan Takibi / Güçlü Momentum"
+                )
+                send_telegram_msg(msg)
+                found_count += 1
+
+            # 2. %5.0 - %9.49 ARASI PRİMLİ HİSSELER
+            elif 5.0 <= change < 9.5:
+                msg = (
+                    f"📈 <b>[YÜKSEK PRİMLİ HİSSE (%5+) - {scan_tag}]</b>\n\n"
+                    f"<b>Hisse Adı:</b> #{symbol}\n"
+                    f"<b>Derece:</b> {star_str}\n"
+                    f"<b>Fiyat / Değişim:</b> {price:.2f} TL (%{change:+.2f})\n"
+                    f"<b>RSI (14):</b> {rsi:.1f} | <b>PD/DD:</b> {pddd_str}\n"
+                    f"<b>KAP Haberi:</b> {kap_str}\n"
+                    f"<b>Strateji:</b> Günlük Yükseliş Trendi"
+                )
+                send_telegram_msg(msg)
+                found_count += 1
+
+            # 3. DİP & DEFTER DEĞERİ DÜŞÜK HİSSELER (RSI <= 30 veya PD/DD < 0.8)
+            elif rsi <= 30 or (pddd is not None and pddd < 0.8):
+                msg = (
+                    f"🛡️ <b>[DİP & DEĞER AVCISI - {scan_tag}]</b>\n\n"
+                    f"<b>Hisse Adı:</b> #{symbol}\n"
+                    f"<b>Derece:</b> {star_str}\n"
+                    f"<b>Fiyat / Değişim:</b> {price:.2f} TL (%{change:+.2f})\n"
+                    f"<b>RSI (14):</b> {rsi:.1f} | <b>PD/DD:</b> {pddd_str}\n"
+                    f"<b>KAP Haberi:</b> {kap_str}\n"
+                    f"<b>Strateji:</b> Kademeli Dip / Ucuz Defter Değeri Alımı"
+                )
+                send_telegram_msg(msg)
+                found_count += 1
+
+    if scan_tag != "17:45":
+        send_telegram_msg(
+            f"✅ <b>[{scan_tag} TAMAMLANDI]</b>\n"
+            f"Toplam {len(symbol_list)} yan tahta taranıp analiz edildi.\n"
+            f"Kriterlere Uyan Sinyal Sayısı: <b>{found_count} Adet</b>"
         )
 
-        send_once(f"DIP:{symbol}", msg)
+def generate_2300_final_report():
+    global CANDIDATES_1745
+    
+    if not CANDIDATES_1745:
+        send_telegram_msg("🌙 <b>[23:00 YARININ TAVAN ADAYLARI RAPORU]</b>\n\nBugün 17:45 taramasında %5 - %9.99 arası primli hisse tespit edilemedi.")
+        return
 
-    # --------------------------------------------------------
-    # 2) ÇOKLU ZAMAN DİLİMLİ MOMENTUM / TAVAN ADAYI
-    # --------------------------------------------------------
-    score = momentum_score(data)
+    msg = (
+        "🌙 <b>[23:00 YARININ TAVAN ADAYLARI NİHAİ RAPORU]</b>\n"
+        f"📊 17:45 Takibindeki Hisse Sayısı: <b>{len(CANDIDATES_1745)} Adet</b>\n"
+        "───────────────────────────\n\n"
+    )
 
-    if score >= 6:
-        stars = momentum_stars(score, volume_ratio)
-
-        h1rec = data.get("1H", {}).get("recommendation", "N/A")
-        h4rec = data.get("4H", {}).get("recommendation", "N/A")
-
-        msg = (
-            f"🚀 <b>GÜÇLÜ MOMENTUM / TAVAN ADAYI</b>\n\n"
-            f"<b>Hisse:</b> #{symbol}\n"
-            f"<b>Skor:</b> {score}/10 {stars}\n"
-            f"<b>Fiyat:</b> {price:.2f} TL\n"
-            f"<b>Günlük değişim:</b> %{change:+.2f}\n"
-            f"<b>1D RSI:</b> {rsi:.1f}\n"
-            f"<b>1H TV:</b> {h1rec}\n"
-            f"<b>4H TV:</b> {h4rec}\n"
-            f"<b>1D TV:</b> {rec}\n"
-            f"<b>{volume_text(volume_ratio)}</b>\n\n"
-            f"<b>Not:</b> Bu bir olasılık/uyarı skorudur; "
-            f"hissenin tavan yapacağını garanti etmez."
+    for sym, data in CANDIDATES_1745.items():
+        msg += (
+            f"📌 <b>#{sym}</b> | Derece: {data['stars']}\n"
+            f"• <b>Kapanış Fiyatı:</b> {data['price']:.2f} TL (%{data['change']:+.2f})\n"
+            f"• <b>RSI (14):</b> {data['rsi']:.1f} | <b>PD/DD:</b> {data['pddd']}\n"
+            f"• <b>KAP Durumu:</b> {data['kap']}\n\n"
         )
 
-        send_once(f"MOM:{symbol}", msg)
+    msg += "💡 <i>Not: Akşam KAP haberi olan ve Defter Değeri (PD/DD < 1.0) ucuz kalan hisseler yarın tavan açılışı için en yüksek potansiyele sahiptir.</i>"
+    
+    send_telegram_msg(msg)
+    CANDIDATES_1745.clear()
 
 # ============================================================
 # ANA DÖNGÜ
 # ============================================================
-def scan_bist_stocks():
-    print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] "
-        f"BIST çoklu zaman dilimli tarama başladı. "
-        f"{len(ALL_STOCKS)} hisse."
-    )
-
-    for symbol in ALL_STOCKS:
-        try:
-            scan_stock(symbol)
-        except Exception as exc:
-            print(f"{symbol} tarama hatası: {exc}")
-
-
 def main():
-    send_telegram_msg(
-        "🤖 <b>BIST TARAMA BOTU V7 AKTİF</b>\n"
-        "BIST 30 + yan tahtalar | 1H + 4H + 1D | "
-        "RSI + momentum + hacim + KAP"
-    )
+    global IS_BOT_STARTED
+    symbols = get_all_bist_tickers()
+    
+    if not IS_BOT_STARTED:
+        send_telegram_msg(
+            "🤖 <b>TRADINGVIEW BİST YAN TAHTA V11 (TOPLU HIZLI TARAMA) AKTİF!</b>\n"
+            "⏰ Özel Tarama Saatleri: <b>09:50</b>, <b>10:10</b> ve <b>17:45</b>\n"
+            f"📊 Toplam Taranan Yan Tahta: <b>~{len(symbols)} Adet</b>\n"
+            "🌟 Derecelendirme: <b>1-5 Yıldızlı Skor Sistemi</b>\n"
+            "🔍 Aktif Filtreler: <b>Tavan (%9.5+), Primliler (%5-%9.49), Defter Değeri (PD/DD < 1.0), KAP Haber Eşleşmesi</b>"
+        )
+        IS_BOT_STARTED = True
+
+        try:
+            send_telegram_msg(
+                "🚀 <b>[BOT BAŞLATILDI - İLK KONTROL TARAMASI BAŞLADI]</b>\n"
+                f"Toplam {len(symbols)} adet yan tahta taranıyor..."
+            )
+            scan_bist_stocks(symbols, "İLK BAŞLATMA TARAMASI")
+        except Exception as e:
+            print(f"Açılış tarama hatası: {e}")
 
     while True:
         try:
+            now = datetime.now()
+            current_time = now.strftime("%H:%M")
+            current_date = now.strftime("%Y-%m-%d")
+
             check_kap_news()
-            scan_bist_stocks()
 
-            print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
-                f"Tarama tamamlandı. {SCAN_MINUTES} dakika bekleniyor."
-            )
+            scan_key = f"{current_date}_{current_time}"
 
-            time.sleep(SCAN_MINUTES * 60)
+            if current_time in TARGET_SCAN_TIMES and scan_key not in SCANNED_TIMES_TODAY:
+                if current_time == "17:45":
+                    send_telegram_msg("⏰ <b>[17:45 KAPANIŞ TARAMASI BAŞLADI]</b>\n%5 - %9.99 arası primli yan tahtalar akşam analizi için hafızaya alınıyor...")
+                
+                scan_bist_stocks(symbols, current_time)
+                SCANNED_TIMES_TODAY.add(scan_key)
+                
+                if current_time == "17:45":
+                    send_telegram_msg(f"✅ <b>[17:45 TARAMASI BİTTİ]</b>\nToplam <b>{len(CANDIDATES_1745)}</b> adet %5-%9.99 arası hisse 23:00 raporu için takibe alındı.")
 
-        except KeyboardInterrupt:
-            print("Bot manuel olarak durduruldu.")
-            break
+            if current_time == "23:00" and scan_key not in SCANNED_TIMES_TODAY:
+                generate_2300_final_report()
+                SCANNED_TIMES_TODAY.add(scan_key)
 
-        except Exception as exc:
-            print(f"Ana döngü hatası: {exc}")
-            time.sleep(60)
+            time.sleep(30)
 
+        except Exception as e:
+            print(f"Döngü Hatası: {e}")
+            time.sleep(30)
 
 if __name__ == "__main__":
-    main()
+    # 1. Borsa tarama botunu arka plan thread'inde baslat
+    bot_thread = threading.Thread(target=main, daemon=True)
+    bot_thread.start()
+
+    # 2. Render port baglantisini ana surecte aninda sagla
+    start_health_check_server()
