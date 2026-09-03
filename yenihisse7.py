@@ -14,7 +14,6 @@ from tradingview_ta import TA_Handler, Interval
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
-# BİST 30 (taranmayacak ağır tahtalar)
 BIST_30_SET = {
     "AKBNK", "ALARK", "ASELS", "ASTOR", "BIMAS", "BRSAN", "DOAS", "EKGYO",
     "ENKAI", "EREGL", "FROTO", "GARAN", "GUBRF", "HEKTS", "ISCTR", "KCHOL",
@@ -22,15 +21,12 @@ BIST_30_SET = {
     "SASA", "SISE", "TCELL", "THYAO", "TOASO", "TUPRS"
 }
 
-# Özel tarama saatleri (Türkiye saati)
 TARGET_SCAN_TIMES = {"09:50", "10:10"}
 
-# Strateji parametreleri
 RSI_DIP_LIMIT = 30
 RSI_MOMENTUM_LIMIT = 50
 CHANGE_MOMENTUM_LIMIT = 2.5
 
-# Yüksek değerli KAP kategorileri
 KAP_STAR_MAP = {
     "bedelsiz": ("⭐⭐⭐⭐⭐", "Yüksek Oranlı Bedelsiz / Sermaye Artırımı"),
     "yeni iş ilişkisi": ("⭐⭐⭐⭐⭐", "Yeni İş İlişkisi / Dev İhale"),
@@ -40,7 +36,6 @@ KAP_STAR_MAP = {
     "pay geri alım": ("⭐⭐⭐⭐", "Şirket Pay Geri Alımı"),
 }
 
-# Duplicate’ler temizlenmiş BİST listesi
 FULL_BIST_LIST = [
     "AAVTUR", "ACSEL", "ADEL", "ADESE", "ADGYO", "AEFES", "AFYON", "AGESA", "AGHOL", "AGROT",
     "AHGAZ", "AKBNK", "AKCNS", "AKFGY", "AKFYE", "AKMGY", "AKSA", "AKSEN", "AKSGY", "AKSUE",
@@ -85,221 +80,4 @@ FULL_BIST_LIST = [
     "SKBNK", "SKTAS", "SMART", "SMRTG", "SMRVA", "SODSN", "SOKE", "SOKM", "SONME", "SRVGY",
     "SUMAS", "SUNTK", "SURGY", "SUWEN", "TABGD", "TARKM", "TATEN", "TATGD", "TAVHL", "TBORG",
     "TCELL", "TDGYO", "TEKTN", "TERA", "TETMT", "TEZOL", "TGSAS", "THYAO", "TIRE", "TKFEN",
-    "TKNSA", "TLMAN", "TMPOL", "TMSN", "TNZTP", "TOASO", "TRGYO", "TRILC", "TSKB", "TSPOR",
-    "TUCLK", "TUPRS", "TUREKS", "TURGG", "TURSG", "UFUK", "ULAS", "ULKER", "ULUFA", "ULUSE",
-    "UNLU", "USAK", "VAKBN", "VAKFN", "VAKKO", "VAPOR", "VERUS", "VESBE", "VESTL", "VKFYO",
-    "VKGYO", "YAPRK", "YATAS", "YAYLA", "YEOTK", "YGGYO", "YGYO", "YKBNK", "YNKGY", "YONGA",
-    "YBTAS", "YUYAT", "YYLGD", "ZEDUR", "ZOREN", "ZRGYO"
-]
-
-# Global state
-PROCESSED_KAP_LINKS = set()
-SCANNED_TIMES_TODAY = set()
-LAST_CLEAN_DATE = None
-
-# Türkiye saat dilimi (UTC+3)
-TR_TZ = timezone(timedelta(hours=3))
-
-
-def get_tr_now():
-    """Türkiye saatine göre şu anki zamanı döner."""
-    return datetime.now(TR_TZ)
-
-
-def send_telegram_msg(message: str):
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
-        print(f"\n[TELEGRAM MESAJI]:\n{message}\n")
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    try:
-        resp = requests.post(url, json=payload, timeout=12)
-        if resp.status_code != 200:
-            print(f"Telegram API hatası: {resp.status_code} - {resp.text}")
-    except Exception as e:
-        print(f"Telegram gönderim hatası: {e}")
-
-
-def get_all_bist_tickers() -> list:
-    """BİST yan tahtalarını çeker. API çökerse yerel listeye düşer."""
-    try:
-        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        res = requests.get(url, headers=headers, timeout=10)
-
-        if res.status_code == 200:
-            data = res.json().get("d", [])
-            fetched = {item.get("code") for item in data if item.get("code") and len(item.get("code", "")) <= 5}
-            filtered = sorted(list(fetched - BIST_30_SET))
-            if len(filtered) >= 400:
-                print(f"✅ Canlı veriden {len(filtered)} yan tahta çekildi.")
-                return filtered
-    except Exception as e:
-        print(f"İş Yatırım API hatası: {e}")
-
-    fallback = sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
-    print(f"ℹ️ Yerel listeden {len(fallback)} yan tahta yüklendi.")
-    return fallback
-
-
-def get_dip_stars(rsi: float) -> str:
-    if rsi <= 15:
-        return "⭐⭐⭐⭐⭐ (Tarihi Dip / Aşırı Satım)"
-    elif rsi <= 20:
-        return "⭐⭐⭐⭐ (Derin Dip Bölgesi)"
-    elif rsi <= 25:
-        return "⭐⭐⭐ (Güçlü Dip Seviyesi)"
-    return "⭐⭐ (Kademeli Giriş Bölgesi)"
-
-
-def get_momentum_stars(rsi: float, change: float, rec: str) -> str:
-    if rec == "STRONG_BUY" and change >= 4.0 and rsi >= 65:
-        return "⭐⭐⭐⭐⭐ (Yüksek Tavan / Hacim Potansiyeli)"
-    elif rec == "STRONG_BUY" and change >= 2.5:
-        return "⭐⭐⭐⭐ (Güçlü Momentum Sinyali)"
-    return "⭐⭐⭐ (Pozitif Yükseliş Trendi)"
-
-
-def analyze_tv_stock(symbol: str) -> dict | None:
-    """TradingView'den günlük teknik analizi çeker."""
-    try:
-        handler = TA_Handler(
-            symbol=symbol,
-            screener="turkey",
-            exchange="BIST",
-            interval=Interval.INTERVAL_1_DAY
-        )
-        analysis = handler.get_analysis()
-        ind = analysis.indicators
-
-        return {
-            "close": ind.get("close"),
-            "change": ind.get("change"),
-            "rsi": ind.get("RSI"),
-            "recommendation": analysis.summary.get("RECOMMENDATION")
-        }
-    except Exception:
-        return None
-
-
-def check_kap_news():
-    """Yüksek değerli KAP haberlerini kontrol eder."""
-    global PROCESSED_KAP_LINKS
-    try:
-        feed = feedparser.parse("https://www.kap.org.tr/tr/rss")
-
-        for entry in feed.entries[:25]:
-            link = getattr(entry, "link", None)
-            if not link or link in PROCESSED_KAP_LINKS:
-                continue
-
-            title = getattr(entry, "title", "")
-            summary = getattr(entry, "summary", "")
-            content = (title + " " + summary).lower()
-
-            for key, (stars, category) in KAP_STAR_MAP.items():
-                if key in content:
-                    PROCESSED_KAP_LINKS.add(link)
-                    msg = (
-                        f"🔥 <b>[YÜKSEK HABER DEĞERİ - KAP İSTİHBARATI]</b>\n\n"
-                        f"<b>Etki Gücü:</b> {stars}\n"
-                        f"<b>Kategori:</b> {category}\n"
-                        f"<b>Başlık:</b> {title}\n"
-                        f"<b>Link:</b> <a href='{link}'>KAP Bildirim Detayı</a>"
-                    )
-                    send_telegram_msg(msg)
-                    break
-    except Exception as e:
-        print(f"KAP kontrol hatası: {e}")
-
-
-def scan_bist_stocks(symbol_list: list, scan_time: str):
-    """Belirtilen yan tahtaları tarar ve Telegram'a bildirir."""
-    print(f"[{get_tr_now().strftime('%H:%M:%S')}] {len(symbol_list)} hisse için {scan_time} taraması başladı...")
-
-    match_count = 0
-    for symbol in symbol_list:
-        data = analyze_tv_stock(symbol)
-        if not data or data.get("rsi") is None or data.get("close") is None:
-            continue
-
-        price = data["close"]
-        rsi = data["rsi"]
-        change = data.get("change") or 0.0
-        rec = data.get("recommendation") or "N/A"
-
-        # Dip & Değer Avcısı
-        if rsi <= RSI_DIP_LIMIT:
-            stars = get_dip_stars(rsi)
-            msg = (
-                f"🛡️ <b>[DİP & DEĞER AVCISI - {scan_time} TARAMASI]</b>\n\n"
-                f"<b>Hisse:</b> #{symbol}\n"
-                f"<b>Derece:</b> {stars}\n"
-                f"<b>Fiyat / Değişim:</b> {price:.2f} TL (%{change:+.2f})\n"
-                f"<b>RSI (14):</b> {rsi:.1f}\n"
-                f"<b>TV Sinyali:</b> {rec}\n"
-                f"<b>Strateji:</b> Kademeli Dip Alımı"
-            )
-            send_telegram_msg(msg)
-            match_count += 1
-
-        # Günlük Momentum / Tavan Adayı
-        if (rsi >= RSI_MOMENTUM_LIMIT and
-                change >= CHANGE_MOMENTUM_LIMIT and
-                rec in ("STRONG_BUY", "BUY")):
-            stars = get_momentum_stars(rsi, change, rec)
-            msg = (
-                f"🚀 <b>[GÜNLÜK TAVAN ADAYI - {scan_time} TARAMASI]</b>\n\n"
-                f"<b>Hisse:</b> #{symbol}\n"
-                f"<b>Derece:</b> {stars}\n"
-                f"<b>Fiyat / Değişim:</b> {price:.2f} TL (%{change:+.2f})\n"
-                f"<b>RSI (14):</b> {rsi:.1f}\n"
-                f"<b>TV Sinyali:</b> {rec} 🔥\n"
-                f"<b>Strateji:</b> Günlük Momentum / Trade"
-            )
-            send_telegram_msg(msg)
-            match_count += 1
-
-        time.sleep(0.07)  # Rate-limit koruması biraz artırıldı
-
-    print(f"[{get_tr_now().strftime('%H:%M:%S')}] {scan_time} taraması bitti. {match_count} fırsat bildirildi.")
-
-
-def clean_daily_state():
-    """Her gün state'i temizler."""
-    global SCANNED_TIMES_TODAY, LAST_CLEAN_DATE, PROCESSED_KAP_LINKS
-    today = get_tr_now().strftime("%Y-%m-%d")
-    if LAST_CLEAN_DATE != today:
-        SCANNED_TIMES_TODAY.clear()
-        # KAP linklerini de günde bir temizlemek istersen açabilirsin:
-        # PROCESSED_KAP_LINKS.clear()
-        LAST_CLEAN_DATE = today
-        print(f"🧹 Günlük state temizlendi: {today}")
-
-
-def main():
-    send_telegram_msg(
-        "🤖 <b>TRADINGVIEW 470 YAN TAHTA BİST BOTU V9 AKTİF!</b>\n"
-        "⏰ Özel Tarama Saatleri: <b>09:50</b> ve <b>10:10</b> (TR)\n"
-        "📊 Taranan Yan Tahta: <b>\~470 Adet</b>\n"
-        "🔥 KAP: Sadece Yüksek Değerli (4-5 Yıldız)"
-    )
-
-    while True:
-        try:
-            clean_daily_state()
-            now = get_tr_now()
-            current_time = now.strftime("%H:%M")
-            current_date = now.strftime("%Y-%m-%d")
-
-            # 1. KAP haber kontrolü
-            check_kap_news()
-
-            # 2. Özel saat taramaları
-            scan_key = f"{current_date}_{current_time}"
+    "TKNSA", "TLMAN", "TMPOL", "TMSN", "TNZTP", "TOASO", "TRGYO", "TRIL
