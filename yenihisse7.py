@@ -21,7 +21,8 @@ BIST_30_SET = {
     "SASA", "SISE", "TCELL", "THYAO", "TOASO", "TUPRS"
 }
 
-TARGET_SCAN_TIMES = {"09:50", "10:10"}
+# Normal tarama saatleri
+TARGET_SCAN_TIMES = {"09:50", "10:10", "17:45"}
 
 RSI_DIP_LIMIT = 30
 RSI_MOMENTUM_LIMIT = 50
@@ -87,9 +88,17 @@ FULL_BIST_LIST = [
     "YBTAS", "YUYAT", "YYLGD", "ZEDUR", "ZOREN", "ZRGYO"
 ]
 
+# State
 PROCESSED_KAP_LINKS = set()
 SCANNED_TIMES_TODAY = set()
 LAST_CLEAN_DATE = None
+INITIAL_SCAN_DONE = False
+EVENING_REPORT_SENT = False
+
+# Gün içinde bulunan adaylar (23:00 raporu için)
+DAILY_DIP_CANDIDATES = []
+DAILY_MOMENTUM_CANDIDATES = []
+DAILY_KAP_NEWS = []
 
 TR_TZ = timezone(timedelta(hours=3))
 
@@ -178,12 +187,13 @@ def analyze_tv_stock(symbol: str):
         return None
 
 
-def check_kap_news():
-    global PROCESSED_KAP_LINKS
+def check_kap_news(intensive=False):
+    """intensive=True → 17:45-22:00 arası daha sık kontrol"""
+    global PROCESSED_KAP_LINKS, DAILY_KAP_NEWS
     try:
         feed = feedparser.parse("https://www.kap.org.tr/tr/rss")
 
-        for entry in feed.entries[:25]:
+        for entry in feed.entries[:30]:
             link = getattr(entry, "link", None)
             if not link or link in PROCESSED_KAP_LINKS:
                 continue
@@ -203,15 +213,26 @@ def check_kap_news():
                         f"<b>Link:</b> <a href='{link}'>KAP Bildirim Detayı</a>"
                     )
                     send_telegram_msg(msg)
+
+                    # 23:00 raporu için kaydet
+                    DAILY_KAP_NEWS.append({
+                        "title": title,
+                        "stars": stars,
+                        "category": category,
+                        "link": link
+                    })
                     break
     except Exception as e:
         print(f"KAP kontrol hatası: {e}")
 
 
-def scan_bist_stocks(symbol_list: list, scan_time: str):
+def scan_bist_stocks(symbol_list: list, scan_time: str, is_evening=False):
     print(f"[{get_tr_now().strftime('%H:%M:%S')}] {len(symbol_list)} hisse için {scan_time} taraması başladı...")
 
     match_count = 0
+    local_dip = []
+    local_momentum = []
+
     for symbol in symbol_list:
         data = analyze_tv_stock(symbol)
         if not data or data.get("rsi") is None or data.get("close") is None:
@@ -222,10 +243,11 @@ def scan_bist_stocks(symbol_list: list, scan_time: str):
         change = data.get("change") or 0.0
         rec = data.get("recommendation") or "N/A"
 
+        # Dip Avcısı
         if rsi <= RSI_DIP_LIMIT:
             stars = get_dip_stars(rsi)
             msg = (
-                f"🛡️ <b>[DİP & DEĞER AVCISI - {scan_time} TARAMASI]</b>\n\n"
+                f"🛡️ <b>[DİP & DEĞER AVCISI - {scan_time}]</b>\n\n"
                 f"<b>Hisse:</b> #{symbol}\n"
                 f"<b>Derece:</b> {stars}\n"
                 f"<b>Fiyat / Değişim:</b> {price:.2f} TL (%{change:+.2f})\n"
@@ -235,13 +257,15 @@ def scan_bist_stocks(symbol_list: list, scan_time: str):
             )
             send_telegram_msg(msg)
             match_count += 1
+            local_dip.append({"symbol": symbol, "rsi": rsi, "change": change, "price": price, "stars": stars})
 
+        # Momentum / Tavan Adayı
         if (rsi >= RSI_MOMENTUM_LIMIT and
                 change >= CHANGE_MOMENTUM_LIMIT and
                 rec in ("STRONG_BUY", "BUY")):
             stars = get_momentum_stars(rsi, change, rec)
             msg = (
-                f"🚀 <b>[GÜNLÜK TAVAN ADAYI - {scan_time} TARAMASI]</b>\n\n"
+                f"🚀 <b>[GÜNLÜK TAVAN ADAYI - {scan_time}]</b>\n\n"
                 f"<b>Hisse:</b> #{symbol}\n"
                 f"<b>Derece:</b> {stars}\n"
                 f"<b>Fiyat / Değişim:</b> {price:.2f} TL (%{change:+.2f})\n"
@@ -251,27 +275,98 @@ def scan_bist_stocks(symbol_list: list, scan_time: str):
             )
             send_telegram_msg(msg)
             match_count += 1
+            local_momentum.append({"symbol": symbol, "rsi": rsi, "change": change, "price": price, "stars": stars, "rec": rec})
 
         time.sleep(0.07)
+
+    # Günlük listeye ekle
+    DAILY_DIP_CANDIDATES.extend(local_dip)
+    DAILY_MOMENTUM_CANDIDATES.extend(local_momentum)
 
     print(f"[{get_tr_now().strftime('%H:%M:%S')}] {scan_time} taraması bitti. {match_count} fırsat bildirildi.")
 
 
+def send_evening_report():
+    """23:00'da yarın için tavan adayları özeti"""
+    global EVENING_REPORT_SENT
+
+    if EVENING_REPORT_SENT:
+        return
+
+    msg_parts = ["🌙 <b>GECE RAPORU - YARIN TAVAN POTANSİYELİ</b>\n"]
+    msg_parts.append(f"Tarih: {get_tr_now().strftime('%d.%m.%Y %H:%M')}\n")
+
+    # Momentum adayları
+    if DAILY_MOMENTUM_CANDIDATES:
+        msg_parts.append("\n🚀 <b>Güçlü Momentum / Tavan Adayları:</b>")
+        # Tekrarları temizle
+        seen = set()
+        for item in sorted(DAILY_MOMENTUM_CANDIDATES, key=lambda x: x["change"], reverse=True):
+            if item["symbol"] not in seen:
+                seen.add(item["symbol"])
+                msg_parts.append(
+                    f"• #{item['symbol']} | %{item['change']:+.2f} | RSI:{item['rsi']:.1f} | {item['stars']}"
+                )
+    else:
+        msg_parts.append("\n🚀 Bugün güçlü momentum adayı bulunamadı.")
+
+    # Dip adayları
+    if DAILY_DIP_CANDIDATES:
+        msg_parts.append("\n\n🛡️ <b>Dip Bölgesindeki Hisseler:</b>")
+        seen = set()
+        for item in sorted(DAILY_DIP_CANDIDATES, key=lambda x: x["rsi"]):
+            if item["symbol"] not in seen:
+                seen.add(item["symbol"])
+                msg_parts.append(
+                    f"• #{item['symbol']} | RSI:{item['rsi']:.1f} | %{item['change']:+.2f}"
+                )
+    else:
+        msg_parts.append("\n\n🛡️ Bugün dip adayı bulunamadı.")
+
+    # KAP haberleri
+    if DAILY_KAP_NEWS:
+        msg_parts.append("\n\n🔥 <b>Bugünün Yüksek Değerli KAP Haberleri:</b>")
+        for news in DAILY_KAP_NEWS[-8:]:  # Son 8 haber
+            msg_parts.append(f"• {news['stars']} {news['title'][:60]}...")
+    else:
+        msg_parts.append("\n\n🔥 Bugün yüksek değerli KAP haberi yakalanmadı.")
+
+    msg_parts.append("\n\n📌 <i>Bu liste yarın sabah tavan avı için referans niteliğindedir.</i>")
+
+    full_msg = "\n".join(msg_parts)
+    send_telegram_msg(full_msg)
+    EVENING_REPORT_SENT = True
+    print("🌙 23:00 Gece raporu gönderildi.")
+
+
 def clean_daily_state():
-    global SCANNED_TIMES_TODAY, LAST_CLEAN_DATE
+    global SCANNED_TIMES_TODAY, LAST_CLEAN_DATE, INITIAL_SCAN_DONE
+    global EVENING_REPORT_SENT, DAILY_DIP_CANDIDATES, DAILY_MOMENTUM_CANDIDATES, DAILY_KAP_NEWS
+
     today = get_tr_now().strftime("%Y-%m-%d")
     if LAST_CLEAN_DATE != today:
         SCANNED_TIMES_TODAY.clear()
+        INITIAL_SCAN_DONE = False
+        EVENING_REPORT_SENT = False
+        DAILY_DIP_CANDIDATES.clear()
+        DAILY_MOMENTUM_CANDIDATES.clear()
+        DAILY_KAP_NEWS.clear()
         LAST_CLEAN_DATE = today
         print(f"🧹 Günlük state temizlendi: {today}")
 
 
 def main():
+    global INITIAL_SCAN_DONE
+
     send_telegram_msg(
-        "🤖 <b>TRADINGVIEW 470 YAN TAHTA BİST BOTU V9 AKTİF!</b>\n"
-        "⏰ Özel Tarama Saatleri: <b>09:50</b> ve <b>10:10</b> (TR)\n"
-        "📊 Taranan Yan Tahta: <b>\~470 Adet</b>\n"
-        "🔥 KAP: Sadece Yüksek Değerli (4-5 Yıldız)"
+        "🤖 <b>TRADINGVIEW 470 YAN TAHTA BİST BOTU V10 AKTİF!</b>\n\n"
+        "⏰ Tarama Saatleri:\n"
+        "• Bot açılır açılmaz\n"
+        "• 09:50\n"
+        "• 10:10\n"
+        "• 17:45\n\n"
+        "🌙 23:00 → Yarın tavan adayları özeti\n"
+        "🔥 KAP: 17:45-22:00 arası yoğun takip"
     )
 
     while True:
@@ -280,9 +375,22 @@ def main():
             now = get_tr_now()
             current_time = now.strftime("%H:%M")
             current_date = now.strftime("%Y-%m-%d")
+            current_hour = now.hour
 
-            check_kap_news()
+            # --- KAP Kontrolü ---
+            # 17:45 - 22:00 arası daha sık (her döngüde)
+            intensive = 17 <= current_hour < 22
+            check_kap_news(intensive=intensive)
 
+            # --- İlk açılış taraması ---
+            if not INITIAL_SCAN_DONE:
+                symbols = get_all_bist_tickers()
+                send_telegram_msg(f"🚀 <b>[İLK AÇILIŞ TARAMASI BAŞLADI]</b>\nToplam {len(symbols)} yan tahta taranıyor...")
+                scan_bist_stocks(symbols, "İlk Açılış")
+                INITIAL_SCAN_DONE = True
+                send_telegram_msg("✅ <b>[İLK AÇILIŞ TARAMASI TAMAMLANDI]</b>")
+
+            # --- Saatlik taramalar ---
             scan_key = f"{current_date}_{current_time}"
             if current_time in TARGET_SCAN_TIMES and scan_key not in SCANNED_TIMES_TODAY:
                 symbols = get_all_bist_tickers()
@@ -290,11 +398,20 @@ def main():
                     f"⏰ <b>[{current_time} SEANS TARAMASI BAŞLADI]</b>\n"
                     f"Toplam {len(symbols)} yan tahta taranıyor..."
                 )
-                scan_bist_stocks(symbols, current_time)
+                is_evening = current_time == "17:45"
+                scan_bist_stocks(symbols, current_time, is_evening=is_evening)
                 SCANNED_TIMES_TODAY.add(scan_key)
                 send_telegram_msg(f"✅ <b>[{current_time} SEANS TARAMASI TAMAMLANDI]</b>")
 
-            time.sleep(30)
+            # --- 23:00 Gece Raporu ---
+            if current_time == "23:00" and not EVENING_REPORT_SENT:
+                send_evening_report()
+
+            # Döngü süresi
+            if intensive:
+                time.sleep(20)   # 17:45-22:00 arası daha sık
+            else:
+                time.sleep(30)
 
         except KeyboardInterrupt:
             print("Bot manuel olarak durduruldu.")
