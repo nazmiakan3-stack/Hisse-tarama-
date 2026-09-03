@@ -14,10 +14,11 @@ try:
     import requests
     import feedparser
     from tradingview_ta import Interval, get_multiple_analysis
+    from gtts import gTTS  # BOTA KONUŞMA YETENEĞİ VEREN KÜTÜPHANE
 except ModuleNotFoundError as e:
     print(f"\n❌ EKSİK KÜTÜPHANE TESPİT EDİLDİ: {e}")
     print("👉 Lütfen terminale şu komutu yazarak gerekli paketleri yükleyin:")
-    print("pip install requests feedparser tradingview-ta\n")
+    print("pip install requests feedparser tradingview-ta gTTS\n")
     exit(1)
 
 # ============================================================
@@ -49,16 +50,10 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
-TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45"]
+TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
 
 RSI_DIP_LIMIT = 30             
-RSI_MOMENTUM_LIMIT = 50        
-CHANGE_MOMENTUM_LIMIT = 2.5    
 TOP_GAINER_LIMIT = 5.0         
-
-# ⚠️ YENİ: Maksimum "Sığ Tahta" Lot Sınırı
-# O günkü işlem gören lot adedi 500.000'den az ise bot bunu "az lotlu/sığ" kabul eder.
-# Bu sayıyı kendi stratejine göre değiştirebilirsin (Örn: 1000000)
 LOW_VOLUME_LIMIT = 500000 
 
 KAP_STAR_MAP = {
@@ -77,12 +72,60 @@ BIST_30_SET = {
 }
 
 FULL_BIST_LIST = [
-    "AAVTUR", "ACSEL", "ADEL", "ADESE", "ADGYO", "AEFES", "AFYON", "AGESA", "AGHOL", "AGROT",
-    "AHGAZ", "AKBNK", "AKCNS", "ALARK", "ALFAS", "ASTOR", "BIMAS", "BRSAN", "CUSAN", "CWENE", 
-    "DOAS", "EGEEN", "EKGYO", "ENKAI", "EREGL", "FROTO", "GARAN", "GESAN", "GUBRF", "HEKTS", 
-    "ISCTR", "KCHOL", "KONTR", "KOZAL", "KRDMD", "MIATK", "ODAS", "OYAKC", "PETKM", "PGSUS", 
-    "SAHOL", "SASA", "SISE", "SMRTG", "TCELL", "THYAO", "TOASO", "TUPRS", "YEOTK", "YKBNK"
-    # Buraya kendi tam listeni yapıştırabilirsin.
+    "A1CAP", "AAVTUR", "ACSEL", "ADEL", "ADESE", "ADGYO", "AEFES", "AFYON", "AGESA", "AGHOL", 
+    "AGROT", "AHGAZ", "AKBNK", "AKCNS", "AKENR", "AKFGY", "AKFYE", "AKGRT", "AKMGY", "AKSA", 
+    "AKSEN", "AKSGY", "ALARK", "ALBRK", "ALCAR", "ALCTL", "ALFAS", "ALGYO", "ALKA", "ALKIM", 
+    "ALMAD", "ALTNY", "ALVES", "ANELE", "ANGEN", "ANHYT", "ANSGR", "ARASE", "ARCLK", "ARDYZ", 
+    "ARENA", "ARSAN", "ARTMS", "ARZUM", "ASELS", "ASGYO", "ASTOR", "ASUZU", "ATAGY", "ATAKP", 
+    "ATATP", "ATEKS", "ATLAS", "ATSYH", "AVGYO", "AVHOL", "AVOD", "AVPGY", "AYCES", "AYDEM", 
+    "AYEN", "AYES", "AYGAZ", "AZTEK", "BAGFS", "BAKAB", "BALAT", "BANVT", "BARMA", "BASGZ", 
+    "BAYRK", "BEAYO", "BEYAZ", "BFREN", "BIENY", "BIGCH", "BIMAS", "BINHO", "BIOEN", "BIZIM", 
+    "BJKAS", "BLCYT", "BMSCH", "BMSTL", "BNTAS", "BOBET", "BORLS", "BORSK", "BOSSA", "BRISA", 
+    "BRKO", "BRKSN", "BRKVY", "BRLSM", "BRMEN", "BRSAN", "BRYAT", "BSOKE", "BTCIM", "BUCIM", 
+    "BURCE", "BURVA", "BVSAN", "BYDNR", "CANTE", "CASA", "CATES", "CCOLA", "CELHA", "CEMAS", 
+    "CEMTS", "CEOEM", "CIMSA", "CLEBI", "CMBTN", "CMENT", "CONSE", "COSMO", "CRDFA", "CRFSA", 
+    "CUSAN", "CVKMD", "CWENE", "DAGHL", "DAGI", "DAPGM", "DARDL", "DATA", "DEFVA", "DERHL", 
+    "DERIM", "DESA", "DESPC", "DEVA", "DGNMO", "DIRIT", "DITAS", "DMRGD", "DMSAS", "DOAS", 
+    "DOBUR", "DOCO", "DOFER", "DOGUB", "DOHOL", "DOKTA", "DURDO", "DYOBY", "DZGYO", "EBEBK", 
+    "ECILC", "ECZYT", "EDATA", "EDIP", "EGEEN", "EGEPO", "EGERT", "EGPRO", "EGSER", "EKGYO", 
+    "EKIZ", "EKOS", "EKSUN", "ELITE", "EMKEL", "ENERY", "ENJSA", "ENKAI", "ENTRA", "EPLAS", 
+    "ERBOS", "ERCAN", "EREGL", "ERSU", "ESCAR", "ESCOM", "ESEN", "ETILR", "ETYAT", "EUHOL", 
+    "EUREN", "EUYO", "EYGYO", "FADE", "FENER", "FLAP", "FMIZP", "FONET", "FORMT", "FORTE", 
+    "FRIGO", "FROTO", "FSYGM", "FZLGY", "GARAN", "GARFA", "GENTS", "GEREL", "GESAN", "GIPTA", 
+    "GLBMD", "GLCVY", "GLRYH", "GLYHO", "GMTAS", "GOKNR", "GOLTS", "GOODY", "GOZDE", "GRNYO", 
+    "GRSEL", "GRTRK", "GSDDE", "GSDHO", "GSRAY", "GUBRF", "GWIND", "GZNMI", "HALKB", "HATEK", 
+    "HATSN", "HDFGS", "HEDEF", "HEKTS", "HKTM", "HLGYO", "HRZNO", "HSCSM", "HUBVC", "HUNER", 
+    "HURGZ", "ICBCT", "ICUGS", "IDGYO", "IEYHO", "IHAAS", "IHEVA", "IHGZT", "IHLAS", "IHLGM", 
+    "IHYAY", "IMASM", "INDES", "INFO", "INGRM", "INTEM", "INVEO", "INVES", "IPEKE", "ISATR", 
+    "ISBIR", "ISBTR", "ISCTR", "ISDMR", "ISFIN", "ISGSY", "ISGYO", "ISKPL", "ISKUR", "ISMEN", 
+    "ISSEN", "ISYAT", "ITTFH", "IZENR", "IZFAS", "IZINV", "IZMDC", "JANTS", "KALES", "KALEK", 
+    "KARSN", "KARTN", "KARYE", "KATMR", "KCAER", "KCHOL", "KENT", "KERVN", "KERVT", "KFEIN", 
+    "KGYO", "KIMMR", "KLGYO", "KLKIM", "KLMSN", "KLNMA", "KLRHO", "KLSYN", "KMPUR", "KNFRT", 
+    "KOCMT", "KONKA", "KONTR", "KONYA", "KOPOL", "KORDS", "KOZAA", "KOZAL", "KRDMA", "KRDMB", 
+    "KRDMD", "KRGYO", "KRONT", "KRPLS", "KRSTL", "KRTEK", "KRVGD", "KSTUR", "KTLEV", "KTSKR", 
+    "KUTPO", "KUVVA", "KUYAS", "KZBGY", "KZGYO", "LIDER", "LIDFA", "LINK", "LKMNH", "LOGO", 
+    "LRSHO", "LUKSK", "MAALT", "MACKO", "MACRO", "MAGEN", "MAKIM", "MAKTK", "MANAS", "MARKA", 
+    "MARTI", "MAVI", "MAXOT", "MEDTR", "MEGAP", "MEKAG", "MEPET", "MERCN", "MERIT", "MERKO", 
+    "METRO", "METUR", "MGROS", "MHRGY", "MIATK", "MIPAZ", "MMCAS", "MNDRS", "MNDTR", "MOBTL", 
+    "MOGAN", "MPARK", "MRGYO", "MRSHL", "MSGYO", "MTRKS", "MTRYO", "MUHAL", "MUREN", "NASHQ", 
+    "NATEN", "NETAS", "NIBAS", "NTGAZ", "NTHOL", "NUGYO", "NUHCM", "OBASE", "OBAMS", "ODAS", 
+    "ODINE", "OFSYM", "ONCSM", "ORCAY", "ORGE", "ORMA", "OSMEN", "OSTIM", "OTKAR", "OTTO", 
+    "OYAKC", "OYAYO", "OYLUM", "OYYAT", "OZGYO", "OZKGY", "OZRDN", "OZSUB", "PAGYO", "PAMEL", 
+    "PAPIL", "PARSN", "PASEU", "PATEK", "PCILT", "PEGYO", "PEKGY", "PENGD", "PENTA", "PETKM", 
+    "PETUN", "PGSUS", "PINSU", "PKART", "PKENT", "PLTUR", "PNLSN", "PNSUT", "POLHO", "POLTK", 
+    "PRDGS", "PRKAB", "PRKME", "PRZMA", "PSDTC", "PSGYO", "QNBFL", "QUAGR", "RALYH", "RAYSG", 
+    "REEDR", "RNPOL", "RODRG", "ROYAL", "RTALB", "RUBNS", "RYGYO", "RYSAS", "SAHOL", "SAMAT", 
+    "SANEL", "SANFM", "SANKO", "SARKY", "SASA", "SAYAS", "SDTTR", "SEGYO", "SEKFK", "SEKUR", 
+    "SELEC", "SELGD", "SELVA", "SEYKM", "SILVR", "SISE", "SKBNK", "SKTAS", "SMART", "SMRTG", 
+    "SNGYO", "SNICA", "SNKRN", "SNPAM", "SNTCD", "SOKE", "SOKM", "SONME", "SRVGY", "SUMAS", 
+    "SUNTK", "SURGY", "SUWEN", "TABGD", "TARKM", "TATEN", "TATGD", "TAVHL", "TBORG", "TCELL", 
+    "TDGYO", "TEKTU", "TERA", "TETMT", "TEZOL", "TGSAS", "THYAO", "TKFEN", "TKNSA", "TLMAN", 
+    "TMPOL", "TMSN", "TOASO", "TRCAS", "TRGYO", "TRILC", "TSGYO", "TSKB", "TSPOR", "TTKOM", 
+    "TTRAK", "TUCLK", "TUKAS", "TUPRS", "TUREX", "TURGG", "TURSG", "UFUK", "ULAS", "ULKER", 
+    "ULUFA", "ULUSE", "ULUUN", "UMPAS", "UNLU", "USAK", "UZERB", "VAKBN", "VAKFN", "VAKKO", 
+    "VANGD", "VBTYZ", "VERTU", "VERUS", "VESBE", "VESTL", "VKFYO", "VKGYO", "VKING", "VRGYO", 
+    "YAPRK", "YATAS", "YAYLA", "YBTAS", "YEOTK", "YESIL", "YGGYO", "YGYO", "YKBNK", "YKSLN", 
+    "YONGA", "YUNSA", "YYAPI", "ZEDUR", "ZOREN", "ZRGYO"
 ]
 
 PROCESSED_KAP_LINKS = set()
@@ -105,8 +148,32 @@ def send_telegram_msg(message):
     }
     try:
         requests.post(url, json=payload, timeout=10)
-    except Exception as e:
+    except Exception:
         pass
+
+# 🎙️ BOTA KONUŞMA YETENEĞİ VEREN FONKSİYON
+def send_telegram_voice(text_to_speak):
+    if TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN" or not TELEGRAM_BOT_TOKEN:
+        print(f"\n[SESLİ UYARI ÇALINIYOR]: {text_to_speak}\n")
+        return
+    try:
+        # Metni Türkçe sese çevir ve kaydet
+        tts = gTTS(text=text_to_speak, lang='tr')
+        audio_filename = "uyari_sesi.ogg"
+        tts.save(audio_filename)
+        
+        # Telegrama Sesli Mesaj (Voice Note) olarak gönder
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice"
+        payload = {"chat_id": TELEGRAM_CHAT_ID}
+        with open(audio_filename, "rb") as audio_file:
+            files = {"voice": audio_file}
+            requests.post(url, data=payload, files=files, timeout=15)
+            
+        # Gönderdikten sonra kalabalık yapmasın diye dosyayı sil
+        if os.path.exists(audio_filename):
+            os.remove(audio_filename)
+    except Exception as e:
+        print(f"Sesli mesaj gönderilirken hata oluştu: {e}")
 
 def get_all_bist_tickers():
     try:
@@ -122,14 +189,8 @@ def get_all_bist_tickers():
         pass
     return sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
 
-def get_dip_stars(rsi):
-    if rsi <= 15: return "⭐⭐⭐⭐⭐ (Tarihi Dip)"
-    elif rsi <= 20: return "⭐⭐⭐⭐ (Derin Dip)"
-    elif rsi <= 25: return "⭐⭐⭐ (Güçlü Dip)"
-    else: return "⭐⭐ (Kademeli Giriş)"
-
 # ============================================================
-# TRADINGVIEW TOPLU TARAMA (HACİM EKLENDİ)
+# TRADINGVIEW TOPLU TARAMA
 # ============================================================
 def analyze_tv_stocks_bulk(symbol_list):
     formatted_symbols = [f"BIST:{sym}" for sym in symbol_list]
@@ -144,13 +205,11 @@ def analyze_tv_stocks_bulk(symbol_list):
                 clean_sym = key.replace("BIST:", "")
                 if analysis and hasattr(analysis, 'indicators') and analysis.indicators:
                     ind = analysis.indicators
-                    rec = analysis.summary.get("RECOMMENDATION") if hasattr(analysis, 'summary') and analysis.summary else "N/A"
                     results[clean_sym] = {
                         "close": ind.get("close"),
                         "change": ind.get("change"),
                         "rsi": ind.get("RSI"),
-                        "volume": ind.get("volume", 0), # YENİ: Anlık lot sayısı verisi çekiliyor
-                        "recommendation": rec
+                        "volume": ind.get("volume", 0)
                     }
         except Exception:
             pass
@@ -188,13 +247,14 @@ def check_kap_news():
         pass
 
 # ============================================================
-# ÖZEL SEANS TARAMASI VE DİNAMİK LOT KONTROLÜ
+# ÖZEL SEANS TARAMASI KONTROLÜ
 # ============================================================
 def scan_bist_stocks(symbol_list, scan_time):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Taraması Başlatıldı...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Taraması Başlatıldı ({scan_time})...")
     
     tv_data_map = analyze_tv_stocks_bulk(symbol_list)
     top_gainers = []
+    gece_bulteni_adaylari = []
 
     for symbol in symbol_list:
         data = tv_data_map.get(symbol)
@@ -205,15 +265,13 @@ def scan_bist_stocks(symbol_list, scan_time):
         rsi = data["rsi"]
         change = data["change"] or 0.0
         volume = data["volume"] or 0
-        rec = data["recommendation"] or "N/A"
 
-        # 🌟 LİSTE İÇİN: +%5 VE ÜZERİ YÜKSELENLER
-        if change >= TOP_GAINER_LIMIT:
+        # LİSTE İÇİN: +%5 VE ÜZERİ YÜKSELENLER (Gün İçi)
+        if change >= TOP_GAINER_LIMIT and scan_time != "23:00":
             top_gainers.append((symbol, change, price, volume))
 
-        # 💎 YENİ STRATEJİ: %5 ile %8 Arası + (Dinamik Az Lot VEYA KAP Haberi)
+        # 💎 STRATEJİ: %5 ile %8 Arası + (Dinamik Az Lot VEYA KAP Haberi)
         if 5.0 <= change <= 8.0:
-            # İşlem gören lot 500 binin altındaysa "Sığ Tahta" kabul et
             is_low_volume = (0 < volume < LOW_VOLUME_LIMIT)
             has_kap = symbol in ACTIVE_KAP_SIGNALS
             
@@ -224,42 +282,62 @@ def scan_bist_stocks(symbol_list, scan_time):
                 if is_low_volume and has_kap:
                     kap_data = ACTIVE_KAP_SIGNALS[symbol]
                     rating = f"⭐⭐⭐⭐⭐ (Mükemmel Kombinasyon)"
-                    strategy_desc = f"Lotu Az ({volume:,.0f} Adet) + {kap_data['category']} Haberi. Tavan potansiyeli çok yüksek!"
+                    strategy_desc = f"Lotu Az + {kap_data['category']} Haberi."
                 elif has_kap:
                     kap_data = ACTIVE_KAP_SIGNALS[symbol]
                     rating = f"{kap_data['stars']} (Haber Katalizörü)"
-                    strategy_desc = f"{kap_data['category']} haberi ile yükselişte."
+                    strategy_desc = f"{kap_data['category']} haberi destekli."
                 elif is_low_volume:
                     rating = "⭐⭐⭐⭐ (Sığ Tahta / Az Lot İvmesi)"
-                    strategy_desc = f"Lot sayısı kısıtlı işlem görüyor. Kademeler hızlı kalkabilir."
+                    strategy_desc = f"Az lot işlem görüyor. Kademeler hızlı kalkabilir."
                 
-                msg = (
-                    f"💎 <b>[ÖZEL KATALİZÖR AVCISI - {scan_time}]</b>\n\n"
-                    f"<b>Hisse Adı:</b> #{symbol}\n"
-                    f"<b>Fiyat / Değişim:</b> {price:.2f} TL (<b>%{change:+.2f}</b>)\n"
-                    f"<b>İşlem Gören Lot (Hacim):</b> {volume:,.0f} Adet\n"
-                    f"<b>Derece:</b> {rating}\n"
-                    f"<b>Strateji:</b> {strategy_desc}\n"
-                )
-                
-                if has_kap:
-                    msg += f"\n📰 <b>KAP Detayı:</b> {ACTIVE_KAP_SIGNALS[symbol]['title']}\n"
-                    msg += f"🔗 <a href='{ACTIVE_KAP_SIGNALS[symbol]['link']}'>Habere Git</a>"
-                
-                send_telegram_msg(msg)
+                # EĞER SAAT 23:00 İSE LİSTEYE EKLE, DEĞİLSE ANINDA GÖNDER
+                if scan_time == "23:00":
+                    gece_bulteni_adaylari.append({
+                        "symbol": symbol, "price": price, "change": change, 
+                        "volume": volume, "rating": rating, "strategy": strategy_desc,
+                        "has_kap": has_kap
+                    })
+                else:
+                    msg = (
+                        f"🚨 <b>[SİNYAL YAKALANDI - {scan_time}]</b> 🚨\n\n"
+                        f"<b>Hisse Adı:</b> #{symbol}\n"
+                        f"<b>Fiyat:</b> {price:.2f} TL (<b>%{change:+.2f}</b>)\n"
+                        f"<b>Hacim:</b> {volume:,.0f} Lot\n"
+                        f"<b>Derece:</b> {rating}\n"
+                        f"<b>Strateji:</b> {strategy_desc}\n"
+                    )
+                    if has_kap:
+                        msg += f"🔗 <a href='{ACTIVE_KAP_SIGNALS[symbol]['link']}'>Habere Git</a>"
+                    send_telegram_msg(msg)
 
         # 🛡️ DİP AVCISI
-        if rsi <= RSI_DIP_LIMIT:
+        if rsi <= RSI_DIP_LIMIT and scan_time != "23:00":
+            dip_stars = "⭐⭐⭐⭐⭐" if rsi <= 15 else "⭐⭐⭐⭐" if rsi <= 20 else "⭐⭐⭐"
             send_telegram_msg(
                 f"🛡️ <b>[DİP AVCISI - {scan_time}]</b>\n\n"
                 f"<b>Hisse Adı:</b> #{symbol}\n"
-                f"<b>Derece:</b> {get_dip_stars(rsi)}\n"
-                f"<b>Fiyat:</b> {price:.2f} TL (%{change:+.2f})\n"
+                f"<b>Derece:</b> {dip_stars}\n"
+                f"<b>Fiyat:</b> {price:.2f} TL\n"
                 f"<b>RSI (14):</b> {rsi:.1f}"
             )
 
-    # 📊 +%5 LİSTESİNİ TOPLU GÖNDER
-    if top_gainers:
+    # 🌙 23:00 GECE BÜLTENİ
+    if scan_time == "23:00":
+        if gece_bulteni_adaylari:
+            gece_bulteni_adaylari.sort(key=lambda x: x["change"], reverse=True)
+            bulten_msg = "🌙 <b>GECE BÜLTENİ: YARININ TAVAN ADAYLARI</b>\n\n"
+            for aday in gece_bulteni_adaylari:
+                bulten_msg += f"🚀 <b>#{aday['symbol']}</b> | {aday['price']:.2f} TL (<b>%{aday['change']:+.2f}</b>)\n"
+                bulten_msg += f"   ├ <b>Lot:</b> {aday['volume']:,.0f}\n"
+                bulten_msg += f"   └ <b>Sebep:</b> {aday['strategy']}\n"
+            bulten_msg += "\n📌 <i>Bol kazançlı bir gün dilerim. Yatırım tavsiyesi değildir.</i>"
+            send_telegram_msg(bulten_msg)
+        else:
+            send_telegram_msg("🌙 <b>GECE BÜLTENİ:</b> Bugün tavan adayı kriteri sağlanamadı.")
+
+    # 📊 +%5 GÜN İÇİ LİSTESİ
+    if top_gainers and scan_time != "23:00":
         top_gainers.sort(key=lambda x: x[1], reverse=True)
         chunk_size = 30
         for i in range(0, len(top_gainers), chunk_size):
@@ -267,32 +345,56 @@ def scan_bist_stocks(symbol_list, scan_time):
             gainer_msg = f"🌟 <b>[+%5 VE ÜZERİ YÜKSELENLER - {scan_time}]</b>\n\n"
             for sym, chg, prc, vol in chunk:
                 gainer_msg += f"<b>#{sym: <6}</b> | +%{chg:.2f} | <b>Lot:</b> {vol:,.0f}\n"
-            gainer_msg += f"\n<i>📌 Toplam: {len(top_gainers)} Hisse Kriteri Sağladı.</i>"
             send_telegram_msg(gainer_msg)
 
 # ============================================================
 # ANA ÇALIŞMA DÖNGÜSÜ
 # ============================================================
 def main():
+    # 1. Bota Güç Verildiği An İlk Bildirim
+    now = datetime.now()
+    current_time_str = now.strftime("%H:%M")
+    
     send_telegram_msg(
-        "🤖 <b>BİST BOTU (OTOMATİK LOT KARŞILAŞTIRMALI AKTİF)</b>\n"
-        "⏰ Özel Tarama Saatleri: <b>09:50</b>, <b>10:10</b> ve <b>17:45</b>\n"
-        f"💎 Yeni Özellik: %5-%8 arası yükselip o günkü işlemi <b>{LOW_VOLUME_LIMIT:,.0f} lottan az olanlar</b> otomatik avlanıyor!"
+        "🤖 <b>BİST BOTU BAŞLATILDI</b>\n"
+        "⏰ Gün İçi: <b>09:50, 10:10, 17:45</b> | Gece: <b>23:00</b>\n"
+        "🚀 <i>Sistemin çalıştığını teyit etmek için anlık piyasa taranıyor... Lütfen bekleyin.</i>"
     )
 
+    # 2. RENDER / İLK AÇILIŞ TARAMASI (Saati beklemeden anında çalışır)
+    try:
+        check_kap_news()
+        hedef_hisseler = get_all_bist_tickers()
+        scan_bist_stocks(hedef_hisseler, f"İLK AÇILIŞ ({current_time_str})")
+        send_telegram_msg("✅ <b>Açılış taraması tamamlandı!</b> Bot hata vermeden çalışıyor. Artık uyku moduna geçip alarm saatlerini bekleyecek.")
+    except Exception as e:
+        send_telegram_msg(f"❌ <b>İlk Taramada Hata:</b> {e}")
+
+    # 3. STANDART ALARM SAATLERİNİ BEKLEME DÖNGÜSÜ
     while True:
         try:
-            now = datetime.now()
-            current_time = now.strftime("%H:%M")
-            current_date = now.strftime("%Y-%m-%d")
+            loop_now = datetime.now()
+            loop_time = loop_now.strftime("%H:%M")
+            loop_date = loop_now.strftime("%Y-%m-%d")
 
             check_kap_news()
-            scan_key = f"{current_date}_{current_time}"
+            scan_key = f"{loop_date}_{loop_time}"
 
-            if current_time in TARGET_SCAN_TIMES and scan_key not in SCANNED_TIMES_TODAY:
-                target_symbols = get_all_bist_tickers()
-                scan_bist_stocks(target_symbols, current_time)
+            if loop_time in TARGET_SCAN_TIMES and scan_key not in SCANNED_TIMES_TODAY:
+                
+                # 🎙️ 09:50'ye ÖZEL SESLİ UYARI VE SİRENLİ MESAJ
+                if loop_time == "09:50":
+                    send_telegram_msg("🚨 <b>DİKKAT: PİYASA AÇILDI!</b> 🚨\nSinyal taraması başlatılıyor...")
+                    send_telegram_voice("Piyasa açıldı.") # SADECE PİYASA AÇILDI DİYOR
+                    time.sleep(2) # Mesajların sana ulaşması için kısa bir bekleme
+                    
+                hedef_hisseler = get_all_bist_tickers()
+                scan_bist_stocks(hedef_hisseler, loop_time)
                 SCANNED_TIMES_TODAY.add(scan_key)
+                
+                if loop_time == "23:00":
+                    ACTIVE_KAP_SIGNALS.clear()
+                    PROCESSED_KAP_LINKS.clear()
 
             time.sleep(30)
         except KeyboardInterrupt:
