@@ -2,3 +2,4 @@ yfinance
 tradingview-ta
 feedparser
 requests
+gTTS==2.5.1
