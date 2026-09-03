@@ -1,4 +1,4 @@
-requests
-feedparser
+yfinance
 tradingview-ta
-
+feedparser
+requests
