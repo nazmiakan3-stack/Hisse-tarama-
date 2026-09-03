@@ -8,10 +8,10 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 import feedparser
-from tradingview_ta import TA_Handler, Interval
+from tradingview_ta import get_multiple_analysis, Interval
 
 # ============================================================
-# SUNUCU & RENDER UPTIME SERVISI (Port 10000 - GET & HEAD Desteği)
+# SUNUCU & RENDER UPTIME SERVISI (Port 10000 - GET & HEAD Tam Desteği)
 # ============================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -49,11 +49,11 @@ BIST_30_SET = {
 TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45"]
 
 CANDIDATES_1745 = {}   
-LATEST_KAP_NEWS = {}   # {symbol: {title, stars, category, link}}
+LATEST_KAP_NEWS = {}   
 PROCESSED_KAP_LINKS = set()
 SCANNED_TIMES_TODAY = set()
 IS_BOT_STARTED = False
-BIST_FUNDAMENTALS = {} # {symbol: pddd_ratio}
+BIST_FUNDAMENTALS = {} 
 
 KAP_STAR_MAP = {
     "bedelsiz": ("⭐⭐⭐⭐⭐", "Bedelsiz / Sermaye Artırımı"),
@@ -130,12 +130,12 @@ def send_telegram_msg(message):
         print(f"Telegram Gönderim Hatası: {e}")
 
 def fetch_is_yatirim_data():
-    """BİST Verilerini ve Defter Değeri (PD/DD) Oranlarını Çeker"""
+    """BİST Defter Değeri (PD/DD) Oranlarını Çeker (Yurt dışı IP korumalı)"""
     global BIST_FUNDAMENTALS
     try:
         url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=8)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             data = res.json().get('d', [])
             for item in data:
@@ -147,7 +147,7 @@ def fetch_is_yatirim_data():
                     except ValueError:
                         pass
     except Exception as e:
-        print(f"İş Yatırım Veri Çekme Hatası: {e}")
+        print(f"İş Yatırım Veri Çekme Uyarısı (Temel veriler olmadan devam ediliyor): {e}")
 
 def get_all_bist_tickers():
     fetch_is_yatirim_data()
@@ -157,24 +157,35 @@ def get_all_bist_tickers():
             return filtered
     return sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
 
-def analyze_tv_stock(symbol):
-    try:
-        handler = TA_Handler(
-            symbol=symbol,
-            screener="turkey",
-            exchange="BIST",
-            interval=Interval.INTERVAL_1_DAY
-        )
-        analysis = handler.get_analysis()
-        ind = analysis.indicators
-        return {
-            "close": ind.get("close"),
-            "change": ind.get("change"),
-            "rsi": ind.get("RSI"),
-            "recommendation": analysis.summary.get("RECOMMENDATION")
-        }
-    except Exception:
-        return None
+def analyze_tv_stocks_bulk(symbol_list):
+    """TradingView API'den tüm hisseleri 50'li paketler halinde HIZLICA çeker."""
+    formatted_symbols = [f"BIST:{sym}" for sym in symbol_list]
+    results = {}
+    chunk_size = 50 
+
+    for i in range(0, len(formatted_symbols), chunk_size):
+        chunk = formatted_symbols[i:i + chunk_size]
+        try:
+            analysis_chunk = get_multiple_analysis(
+                screener="turkey",
+                interval=Interval.INTERVAL_1_DAY,
+                symbols=chunk
+            )
+            for key, analysis in analysis_chunk.items():
+                clean_sym = key.replace("BIST:", "")
+                if analysis and hasattr(analysis, 'indicators') and analysis.indicators:
+                    ind = analysis.indicators
+                    rec = analysis.summary.get("RECOMMENDATION") if hasattr(analysis, 'summary') and analysis.summary else "N/A"
+                    results[clean_sym] = {
+                        "close": ind.get("close"),
+                        "change": ind.get("change"),
+                        "rsi": ind.get("RSI"),
+                        "recommendation": rec
+                    }
+        except Exception as e:
+            print(f"TradingView Toplu Tarama Hatası (Paket {i}): {e}")
+            
+    return results
 
 def check_kap_news():
     global PROCESSED_KAP_LINKS, LATEST_KAP_NEWS
@@ -219,7 +230,6 @@ def check_kap_news():
         print(f"KAP Hatası: {e}")
 
 def calculate_star_rating(change, rsi, pddd, kap_exists):
-    """Dinamik 1-5 Yıldızlı Skorlama Sistemini Çalıştırır"""
     score = 1
     if change >= 9.5:
         score += 3
@@ -248,8 +258,11 @@ def scan_bist_stocks(symbol_list, scan_tag):
     if scan_tag == "17:45":
         CANDIDATES_1745.clear()
 
+    # Toplu veri çekme çağrısı
+    tv_data_map = analyze_tv_stocks_bulk(symbol_list)
+
     for symbol in symbol_list:
-        data = analyze_tv_stock(symbol)
+        data = tv_data_map.get(symbol)
         if not data or data["rsi"] is None or data["close"] is None:
             continue
 
@@ -291,10 +304,10 @@ def scan_bist_stocks(symbol_list, scan_tag):
                 send_telegram_msg(msg)
                 found_count += 1
 
-            # 2. %5.0 - %8.0 ARASI PRİMLİ HİSSELER
-            elif 5.0 <= change <= 8.0:
+            # 2. %5.0 - %9.49 ARASI PRİMLİ HİSSELER (Tüm yüzde boşluğu kapatıldı)
+            elif 5.0 <= change < 9.5:
                 msg = (
-                    f"📈 <b>[YÜKSEK PRİMLİ HİSSE (%5-%8) - {scan_tag}]</b>\n\n"
+                    f"📈 <b>[YÜKSEK PRİMLİ HİSSE (%5+) - {scan_tag}]</b>\n\n"
                     f"<b>Hisse Adı:</b> #{symbol}\n"
                     f"<b>Derece:</b> {star_str}\n"
                     f"<b>Fiyat / Değişim:</b> {price:.2f} TL (%{change:+.2f})\n"
@@ -318,8 +331,6 @@ def scan_bist_stocks(symbol_list, scan_tag):
                 )
                 send_telegram_msg(msg)
                 found_count += 1
-
-        time.sleep(0.04)
 
     if scan_tag != "17:45":
         send_telegram_msg(
@@ -363,11 +374,11 @@ def main():
     
     if not IS_BOT_STARTED:
         send_telegram_msg(
-            "🤖 <b>TRADINGVIEW BİST YAN TAHTA V10 YILDIZLI BOT AKTİF!</b>\n"
+            "🤖 <b>TRADINGVIEW BİST YAN TAHTA V11 (TOPLU HIZLI TARAMA) AKTİF!</b>\n"
             "⏰ Özel Tarama Saatleri: <b>09:50</b>, <b>10:10</b> ve <b>17:45</b>\n"
             f"📊 Toplam Taranan Yan Tahta: <b>~{len(symbols)} Adet</b>\n"
             "🌟 Derecelendirme: <b>1-5 Yıldızlı Skor Sistemi</b>\n"
-            "🔍 Aktif Filtreler: <b>Tavan (%9.5+), %5-%8 Primliler, Defter Değeri (PD/DD < 1.0), KAP Haber Eşleşmesi</b>"
+            "🔍 Aktif Filtreler: <b>Tavan (%9.5+), Primliler (%5-%9.49), Defter Değeri (PD/DD < 1.0), KAP Haber Eşleşmesi</b>"
         )
         IS_BOT_STARTED = True
 
