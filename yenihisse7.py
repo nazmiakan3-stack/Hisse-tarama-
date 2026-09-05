@@ -150,6 +150,18 @@ def send_telegram_msg(message):
     except Exception:
         pass
 
+def format_compact_volume(v):
+    """Hacim sayılarını mobil ekrana sığacak şekilde kısaltır (Örn: 120.1M, 1.5M, 450K)"""
+    try:
+        v = float(v)
+        if v >= 1_000_000:
+            return f"{v/1_000_000:.1f}M"
+        elif v >= 1_000:
+            return f"{v/1_000:.0f}K"
+        return str(int(v))
+    except Exception:
+        return "0"
+
 def get_all_bist_tickers():
     try:
         url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
@@ -296,15 +308,16 @@ def scan_bist_stocks(symbol_list, scan_time):
             gece_bulteni_adaylari.sort(key=lambda x: x["change"], reverse=True)
             bulten_msg = "🌙 <b>GECE BÜLTENİ: YARININ TAVAN ADAYLARI</b>\n───────────────────\n\n"
             for aday in gece_bulteni_adaylari:
+                vol_str = format_compact_volume(aday['volume'])
                 bulten_msg += f"🚀 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> (<b>%{aday['change']:+.2f}</b>)\n"
-                bulten_msg += f"├ <b>Lot:</b> {aday['volume']:,.0f}\n"
+                bulten_msg += f"├ <b>Vol:</b> {vol_str}\n"
                 bulten_msg += f"└ <b>Sebep:</b> {aday['strategy']}\n\n"
             bulten_msg += "📌 <i>Bol kazançlar dilerim. Yatırım tavsiyesi değildir.</i>"
             send_telegram_msg(bulten_msg)
         else:
             send_telegram_msg("🌙 <b>GECE BÜLTENİ:</b> Bugün tavan adayı kriteri sağlanamadı.")
 
-    # 💎 ÖZEL KATALİZÖR AVCISI (ŞIK MOBİL FORMAT)
+    # 💎 ÖZEL KATALİZÖR AVCISI
     if ozel_katalizor_adaylari and scan_time != "23:00":
         ozel_katalizor_adaylari.sort(key=lambda x: x["change"], reverse=True)
         chunk_size = 8
@@ -312,8 +325,9 @@ def scan_bist_stocks(symbol_list, scan_time):
             chunk = ozel_katalizor_adaylari[i:i + chunk_size]
             msg = f"💎 <b>[ÖZEL KATALİZÖR AVCISI - {scan_time}]</b>\n───────────────────\n\n"
             for aday in chunk:
+                vol_str = format_compact_volume(aday['volume'])
                 msg += f"🔹 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> (<b>%{aday['change']:+.2f}</b>)\n"
-                msg += f"├ <b>Hacim:</b> {aday['volume']:,.0f} Lot\n"
+                msg += f"├ <b>Hacim:</b> {vol_str}\n"
                 msg += f"├ <b>Derece:</b> {aday['rating']}\n"
                 msg += f"└ <b>Strateji:</b> {aday['strategy']}\n"
                 if aday['link']:
@@ -322,7 +336,7 @@ def scan_bist_stocks(symbol_list, scan_time):
             send_telegram_msg(msg)
             time.sleep(1)
 
-    # 🛡️ DİP AVCISI (MOBİL FORMAT - TAŞMA YAPMAZ)
+    # 🛡️ DİP AVCISI
     if dip_avcisi_adaylari and scan_time != "23:00":
         dip_avcisi_adaylari.sort(key=lambda x: x["rsi"])
         chunk_size = 15
@@ -330,12 +344,11 @@ def scan_bist_stocks(symbol_list, scan_time):
             chunk = dip_avcisi_adaylari[i:i + chunk_size]
             msg = f"🛡️ <b>[DİP AVCISI - {scan_time}]</b>\n───────────────────\n\n"
             for aday in chunk:
-                # Kısaltılmış ve tek satıra sığacak şekilde düzenlendi:
                 msg += f"🔹 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> | RSI: <b>{aday['rsi']:.1f}</b> {aday['stars']}\n"
             send_telegram_msg(msg)
             time.sleep(1)
 
-    # 📊 +%5 GÜN İÇİ LİSTESİ
+    # 📊 +%5 GÜN İÇİ LİSTESİ (Kısa Hacim Formatı İle Tek Satır Garanti)
     if top_gainers and scan_time != "23:00":
         top_gainers.sort(key=lambda x: x[1], reverse=True)
         chunk_size = 25
@@ -343,7 +356,8 @@ def scan_bist_stocks(symbol_list, scan_time):
             chunk = top_gainers[i:i + chunk_size]
             gainer_msg = f"🌟 <b>[+%5 VE ÜZERİ YÜKSELENLER - {scan_time}]</b>\n───────────────────\n\n"
             for sym, chg, prc, vol in chunk:
-                gainer_msg += f"📈 <b>#{sym}</b> | <b>{prc:.2f} TL</b> (+%{chg:.2f}) | <b>{vol:,.0f} Lot</b>\n"
+                vol_str = format_compact_volume(vol)
+                gainer_msg += f"📈 <b>#{sym}</b> | <b>{prc:.2f} TL</b> (+%{chg:.2f}) | <b>{vol_str}</b>\n"
             send_telegram_msg(gainer_msg)
             time.sleep(1)
 
