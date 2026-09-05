@@ -259,15 +259,15 @@ def scan_bist_stocks(symbol_list, scan_time):
                 
                 if is_low_volume and has_kap:
                     kap_data = ACTIVE_KAP_SIGNALS[symbol]
-                    rating = f"⭐⭐⭐⭐⭐ (Mükemmel Kombinasyon)"
-                    strategy_desc = f"Lotu Az + {kap_data['category']} Haberi."
+                    rating = "⭐⭐⭐⭐⭐"
+                    strategy_desc = f"Lotu Az + {kap_data['category']}"
                 elif has_kap:
                     kap_data = ACTIVE_KAP_SIGNALS[symbol]
-                    rating = f"{kap_data['stars']} (Haber Katalizörü)"
+                    rating = kap_data['stars']
                     strategy_desc = f"{kap_data['category']} haberi destekli."
                 elif is_low_volume:
-                    rating = "⭐⭐⭐⭐ (Sığ Tahta / Az Lot İvmesi)"
-                    strategy_desc = f"Az lot işlem görüyor. Kademeler hızlı kalkabilir."
+                    rating = "⭐⭐⭐⭐"
+                    strategy_desc = "Sığ Tahta / Az Lot (Hızlı kalkabilir)"
                 
                 if scan_time == "23:00":
                     gece_bulteni_adaylari.append({
@@ -294,25 +294,25 @@ def scan_bist_stocks(symbol_list, scan_time):
     if scan_time == "23:00":
         if gece_bulteni_adaylari:
             gece_bulteni_adaylari.sort(key=lambda x: x["change"], reverse=True)
-            bulten_msg = "🌙 <b>GECE BÜLTENİ: YARININ TAVAN ADAYLARI</b>\n\n"
+            bulten_msg = "🌙 <b>GECE BÜLTENİ: YARININ TAVAN ADAYLARI</b>\n───────────────────\n\n"
             for aday in gece_bulteni_adaylari:
-                bulten_msg += f"🚀 <b>#{aday['symbol']}</b> | {aday['price']:.2f} TL (<b>%{aday['change']:+.2f}</b>)\n"
-                bulten_msg += f"   ├ <b>Lot:</b> {aday['volume']:,.0f}\n"
-                bulten_msg += f"   └ <b>Sebep:</b> {aday['strategy']}\n"
-            bulten_msg += "\n📌 <i>Bol kazançlı bir gün dilerim. Yatırım tavsiyesi değildir.</i>"
+                bulten_msg += f"🚀 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> (<b>%{aday['change']:+.2f}</b>)\n"
+                bulten_msg += f"├ <b>Lot:</b> {aday['volume']:,.0f}\n"
+                bulten_msg += f"└ <b>Sebep:</b> {aday['strategy']}\n\n"
+            bulten_msg += "📌 <i>Bol kazançlar dilerim. Yatırım tavsiyesi değildir.</i>"
             send_telegram_msg(bulten_msg)
         else:
             send_telegram_msg("🌙 <b>GECE BÜLTENİ:</b> Bugün tavan adayı kriteri sağlanamadı.")
 
-    # 💎 ÖZEL KATALİZÖR AVCISI (TOPLU / GRUPLU GÖNDERİM)
+    # 💎 ÖZEL KATALİZÖR AVCISI (ŞIK MOBİL FORMAT)
     if ozel_katalizor_adaylari and scan_time != "23:00":
         ozel_katalizor_adaylari.sort(key=lambda x: x["change"], reverse=True)
-        chunk_size = 10
+        chunk_size = 8
         for i in range(0, len(ozel_katalizor_adaylari), chunk_size):
             chunk = ozel_katalizor_adaylari[i:i + chunk_size]
-            msg = f"💎 <b>[ÖZEL KATALİZÖR AVCISI - {scan_time}]</b>\n\n"
+            msg = f"💎 <b>[ÖZEL KATALİZÖR AVCISI - {scan_time}]</b>\n───────────────────\n\n"
             for aday in chunk:
-                msg += f"<b>#{aday['symbol']}</b> | {aday['price']:.2f} TL (<b>%{aday['change']:+.2f}</b>)\n"
+                msg += f"🔹 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> (<b>%{aday['change']:+.2f}</b>)\n"
                 msg += f"├ <b>Hacim:</b> {aday['volume']:,.0f} Lot\n"
                 msg += f"├ <b>Derece:</b> {aday['rating']}\n"
                 msg += f"└ <b>Strateji:</b> {aday['strategy']}\n"
@@ -320,29 +320,30 @@ def scan_bist_stocks(symbol_list, scan_time):
                     msg += f"   🔗 <a href='{aday['link']}'>Habere Git</a>\n"
                 msg += "\n"
             send_telegram_msg(msg)
-            time.sleep(1) # Telegram spam koruması için kısa bekleme
+            time.sleep(1)
 
-    # 🛡️ DİP AVCISI (TOPLU / GRUPLU GÖNDERİM)
+    # 🛡️ DİP AVCISI (MOBİL FORMAT - TAŞMA YAPMAZ)
     if dip_avcisi_adaylari and scan_time != "23:00":
         dip_avcisi_adaylari.sort(key=lambda x: x["rsi"])
         chunk_size = 15
         for i in range(0, len(dip_avcisi_adaylari), chunk_size):
             chunk = dip_avcisi_adaylari[i:i + chunk_size]
-            msg = f"🛡️ <b>[DİP AVCISI - {scan_time}]</b>\n\n"
+            msg = f"🛡️ <b>[DİP AVCISI - {scan_time}]</b>\n───────────────────\n\n"
             for aday in chunk:
-                msg += f"<b>#{aday['symbol']}</b> | Fiyat: {aday['price']:.2f} TL | RSI: <b>{aday['rsi']:.1f}</b> | {aday['stars']}\n"
+                # Kısaltılmış ve tek satıra sığacak şekilde düzenlendi:
+                msg += f"🔹 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> | RSI: <b>{aday['rsi']:.1f}</b> {aday['stars']}\n"
             send_telegram_msg(msg)
             time.sleep(1)
 
     # 📊 +%5 GÜN İÇİ LİSTESİ
     if top_gainers and scan_time != "23:00":
         top_gainers.sort(key=lambda x: x[1], reverse=True)
-        chunk_size = 30
+        chunk_size = 25
         for i in range(0, len(top_gainers), chunk_size):
             chunk = top_gainers[i:i + chunk_size]
-            gainer_msg = f"🌟 <b>[+%5 VE ÜZERİ YÜKSELENLER - {scan_time}]</b>\n\n"
+            gainer_msg = f"🌟 <b>[+%5 VE ÜZERİ YÜKSELENLER - {scan_time}]</b>\n───────────────────\n\n"
             for sym, chg, prc, vol in chunk:
-                gainer_msg += f"<b>#{sym: <6}</b> | +%{chg:.2f} | <b>Lot:</b> {vol:,.0f}\n"
+                gainer_msg += f"📈 <b>#{sym}</b> | <b>{prc:.2f} TL</b> (+%{chg:.2f}) | <b>{vol:,.0f} Lot</b>\n"
             send_telegram_msg(gainer_msg)
             time.sleep(1)
 
@@ -363,7 +364,7 @@ def main():
         check_kap_news()
         hedef_hisseler = get_all_bist_tickers()
         scan_bist_stocks(hedef_hisseler, f"İLK AÇILIŞ ({current_time_str})")
-        send_telegram_msg("✅ <b>Açılış taraması tamamlandı!</b> Bot hata vermeden çalışıyor. Artık uyku moduna geçip alarm saatlerini bekleyecek.")
+        send_telegram_msg("✅ <b>Açılış taraması tamamlandı!</b> Bot sorunsuz çalışıyor. Alarm saatleri beklenecek.")
     except Exception as e:
         send_telegram_msg(f"❌ <b>İlk Taramada Hata:</b> {e}")
 
