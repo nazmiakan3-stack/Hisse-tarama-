@@ -51,9 +51,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
 TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
 
-RSI_DIP_LIMIT = 30             
-TOP_GAINER_LIMIT = 5.0         
-LOW_VOLUME_LIMIT = 500000 
+MIN_VOLUME_LIMIT = 20_000_000   # Günlük Hacim > 20 Milyon TL/Lot
+MIN_REL_VOLUME_LIMIT = 1.5      # Günlük Göreceli Hacim > 1.5x
+WEEKLY_RSI_DIP_LIMIT = 35       # Haftalık RSI Dip Limiti
 
 KAP_STAR_MAP = {
     "bedelsiz": ("⭐⭐⭐⭐⭐", "Yüksek Oranlı Bedelsiz / Sermaye Artırımı"),
@@ -151,7 +151,6 @@ def send_telegram_msg(message):
         pass
 
 def format_compact_volume(v):
-    """Hacim sayılarını mobil ekrana sığacak şekilde kısaltır (Örn: 120.1M, 1.5M, 450K)"""
     try:
         v = float(v)
         if v >= 1_000_000:
@@ -177,7 +176,7 @@ def get_all_bist_tickers():
     return sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
 
 # ============================================================
-# TRADINGVIEW TOPLU TARAMA
+# TRADINGVIEW TOPLU TARAMA (GÜNLÜK VE HAFTALIK)
 # ============================================================
 def analyze_tv_stocks_bulk(symbol_list):
     formatted_symbols = [f"BIST:{sym}" for sym in symbol_list]
@@ -187,16 +186,33 @@ def analyze_tv_stocks_bulk(symbol_list):
     for i in range(0, len(formatted_symbols), chunk_size):
         chunk = formatted_symbols[i:i + chunk_size]
         try:
-            analysis_chunk = get_multiple_analysis(screener="turkey", interval=Interval.INTERVAL_1_DAY, symbols=chunk)
-            for key, analysis in analysis_chunk.items():
+            # Günlük Veriler
+            daily_analysis = get_multiple_analysis(screener="turkey", interval=Interval.INTERVAL_1_DAY, symbols=chunk)
+            # Haftalık Veriler
+            weekly_analysis = get_multiple_analysis(screener="turkey", interval=Interval.INTERVAL_1_WEEK, symbols=chunk)
+
+            for key in chunk:
                 clean_sym = key.replace("BIST:", "")
-                if analysis and hasattr(analysis, 'indicators') and analysis.indicators:
-                    ind = analysis.indicators
+                d_data = daily_analysis.get(key)
+                w_data = weekly_analysis.get(key)
+
+                if d_data and hasattr(d_data, 'indicators') and w_data and hasattr(w_data, 'indicators'):
+                    d_ind = d_data.indicators
+                    w_ind = w_data.indicators
+
                     results[clean_sym] = {
-                        "close": ind.get("close"),
-                        "change": ind.get("change"),
-                        "rsi": ind.get("RSI"),
-                        "volume": ind.get("volume", 0)
+                        # Günlük Değerler
+                        "close": d_ind.get("close"),
+                        "change": d_ind.get("change"),
+                        "rsi_daily": d_ind.get("RSI"),
+                        "volume": d_ind.get("volume", 0),
+                        "volume_avg10": d_ind.get("average_volume_10d_calc", 0),
+                        "atr_14": d_ind.get("ATR"),  # 14 Günlük ATR
+                        
+                        # Haftalık Değerler (Dip ve Stokastik Kesişimi)
+                        "rsi_weekly": w_ind.get("RSI"),
+                        "stoch_k_weekly": w_ind.get("Stoch.K"),
+                        "stoch_d_weekly": w_ind.get("Stoch.D")
                     }
         except Exception:
             pass
@@ -244,120 +260,127 @@ def scan_bist_stocks(symbol_list, scan_time):
     top_gainers = []
     gece_bulteni_adaylari = []
     ozel_katalizor_adaylari = []
-    dip_avcisi_adaylari = []
 
     for symbol in symbol_list:
         data = tv_data_map.get(symbol)
-        if not data or data["rsi"] is None or data["close"] is None:
+        if not data or data["close"] is None or data["rsi_weekly"] is None:
             continue
 
         price = data["close"]
-        rsi = data["rsi"]
         change = data["change"] or 0.0
         volume = data["volume"] or 0
+        volume_avg10 = data["volume_avg10"] or 0
+        rsi_w = data["rsi_weekly"]
+        stoch_k_w = data["stoch_k_weekly"]
+        stoch_d_w = data["stoch_d_weekly"]
+        atr = data["atr_14"] or (price * 0.03) # ATR Yoksa varsayılan %3 tolerans
 
-        # LİSTE İÇİN: +%5 VE ÜZERİ YÜKSELENLER (Gün İçi)
-        if change >= TOP_GAINER_LIMIT and scan_time != "23:00":
-            top_gainers.append((symbol, change, price, volume))
+        # ATR BAZLI HESAPLAMALAR
+        sl_price = price - (1.5 * atr)
+        tp_price = price + (3.0 * atr)
 
-        # 💎 STRATEJİ: %5 ile %8 Arası + (Dinamik Az Lot VEYA KAP Haberi)
-        if 5.0 <= change <= 8.0:
-            is_low_volume = (0 < volume < LOW_VOLUME_LIMIT)
-            has_kap = symbol in ACTIVE_KAP_SIGNALS
-            
-            if is_low_volume or has_kap:
-                rating = "⭐⭐⭐⭐"
-                strategy_desc = ""
-                
-                if is_low_volume and has_kap:
-                    kap_data = ACTIVE_KAP_SIGNALS[symbol]
-                    rating = "⭐⭐⭐⭐⭐"
-                    strategy_desc = f"Lotu Az + {kap_data['category']}"
-                elif has_kap:
-                    kap_data = ACTIVE_KAP_SIGNALS[symbol]
-                    rating = kap_data['stars']
-                    strategy_desc = f"{kap_data['category']} haberi destekli."
-                elif is_low_volume:
-                    rating = "⭐⭐⭐⭐"
-                    strategy_desc = "Sığ Tahta / Az Lot (Hızlı kalkabilir)"
-                
-                if scan_time == "23:00":
-                    gece_bulteni_adaylari.append({
-                        "symbol": symbol, "price": price, "change": change, 
-                        "volume": volume, "rating": rating, "strategy": strategy_desc,
-                        "has_kap": has_kap
-                    })
-                else:
-                    ozel_katalizor_adaylari.append({
-                        "symbol": symbol, "price": price, "change": change, 
-                        "volume": volume, "rating": rating, "strategy": strategy_desc,
-                        "has_kap": has_kap,
-                        "link": ACTIVE_KAP_SIGNALS[symbol]['link'] if has_kap else None
-                    })
+        # ----------------------------------------------------
+        # KATI STRATEJİ FİLTRELERİ
+        # ----------------------------------------------------
+        # 1. Günü Artı Kapatacak / Artıda Olacak
+        if change <= 0:
+            continue
 
-        # 🛡️ DİP AVCISI
-        if rsi <= RSI_DIP_LIMIT and scan_time != "23:00":
-            dip_stars = "⭐⭐⭐⭐⭐" if rsi <= 15 else "⭐⭐⭐⭐" if rsi <= 20 else "⭐⭐⭐"
-            dip_avcisi_adaylari.append({
-                "symbol": symbol, "price": price, "rsi": rsi, "stars": dip_stars
+        # 2. Günlük Hacim Mutlaka 20 Milyon Üstü Olacak
+        if volume < MIN_VOLUME_LIMIT:
+            continue
+
+        # 3. Günlük Göreceli Hacim (10 Günlük Ort.) >= 1.5 Olacak
+        rel_volume = (volume / volume_avg10) if volume_avg10 > 0 else 0
+        if rel_volume < MIN_REL_VOLUME_LIMIT:
+            continue
+
+        # 4. Haftalık RSI Dip Bölgesinde (<= 35)
+        if rsi_w > WEEKLY_RSI_DIP_LIMIT:
+            continue
+
+        # 5. Haftalık Stokastik Kesişimi (Stoch K > Stoch D -> Al Sinyali)
+        is_stoch_crossed = (stoch_k_w is not None and stoch_d_w is not None and stoch_k_w > stoch_d_w)
+        if not is_stoch_crossed:
+            continue
+
+        # ----------------------------------------------------
+        # FİLTRELERİ GEÇEN HİSSELERE 5 YILDIZ PUANLAMA
+        # ----------------------------------------------------
+        rating = "⭐⭐⭐⭐⭐"
+        strategy_desc = f"Haftalık Dip Dönüşü (RSI: {rsi_w:.1f} | RelVol: {rel_volume:.1f}x)"
+
+        has_kap = symbol in ACTIVE_KAP_SIGNALS
+        if has_kap:
+            strategy_desc += f" + KAP: {ACTIVE_KAP_SIGNALS[symbol]['category']}"
+
+        # Gece Bülteni için Toplama
+        if scan_time == "23:00":
+            gece_bulteni_adaylari.append({
+                "symbol": symbol, "price": price, "change": change, 
+                "volume": volume, "rel_vol": rel_volume, "rsi_w": rsi_w,
+                "sl": sl_price, "tp": tp_price,
+                "rating": rating, "strategy": strategy_desc
             })
+        else:
+            ozel_katalizor_adaylari.append({
+                "symbol": symbol, "price": price, "change": change, 
+                "volume": volume, "rel_vol": rel_volume, "rsi_w": rsi_w,
+                "sl": sl_price, "tp": tp_price,
+                "rating": rating, "strategy": strategy_desc,
+                "link": ACTIVE_KAP_SIGNALS[symbol]['link'] if has_kap else None
+            })
+
+        if change >= 3.0 and scan_time != "23:00":
+            top_gainers.append((symbol, change, price, volume, rel_volume, rsi_w, sl_price, tp_price))
 
     # 🌙 23:00 GECE BÜLTENİ
     if scan_time == "23:00":
         if gece_bulteni_adaylari:
             gece_bulteni_adaylari.sort(key=lambda x: x["change"], reverse=True)
-            bulten_msg = "🌙 <b>GECE BÜLTENİ: YARININ TAVAN ADAYLARI</b>\n───────────────────\n\n"
+            bulten_msg = "🌙 <b>GECE BÜLTENİ: YARININ TAVAN SERİSİ ADAYLARI (5 YILDIZ)</b>\n───────────────────\n\n"
             for aday in gece_bulteni_adaylari:
                 vol_str = format_compact_volume(aday['volume'])
-                bulten_msg += f"🚀 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> (<b>%{aday['change']:+.2f}</b>)\n"
-                bulten_msg += f"├ <b>Vol:</b> {vol_str}\n"
-                bulten_msg += f"└ <b>Sebep:</b> {aday['strategy']}\n\n"
+                bulten_msg += f"🚀 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> (<b>%{aday['change']:+.2f}</b>) {aday['rating']}\n"
+                bulten_msg += f"├ <b>Hacim:</b> {vol_str} | <b>RelVol:</b> {aday['rel_vol']:.1f}x\n"
+                bulten_msg += f"├ <b>🎯 TP (Kar):</b> <code>{aday['tp']:.2f} TL</code> (+3x ATR)\n"
+                bulten_msg += f"├ <b>🛑 SL (Stop):</b> <code>{aday['sl']:.2f} TL</code> (-1.5x ATR)\n"
+                bulten_msg += f"└ <b>Strateji:</b> {aday['strategy']}\n\n"
             bulten_msg += "📌 <i>Bol kazançlar dilerim. Yatırım tavsiyesi değildir.</i>"
             send_telegram_msg(bulten_msg)
         else:
-            send_telegram_msg("🌙 <b>GECE BÜLTENİ:</b> Bugün tavan adayı kriteri sağlanamadı.")
+            send_telegram_msg("🌙 <b>GECE BÜLTENİ:</b> Bugün tavan serisi kriterini (Haftalık Dip + Stoch Kesişimi + Güçlü Hacim) sağlayan hisse bulunamadı.")
 
-    # 💎 ÖZEL KATALİZÖR AVCISI
+    # 💎 ÖZEL KATALİZÖR AVCISI (GÜN İÇİ SEANS)
     if ozel_katalizor_adaylari and scan_time != "23:00":
         ozel_katalizor_adaylari.sort(key=lambda x: x["change"], reverse=True)
         chunk_size = 8
         for i in range(0, len(ozel_katalizor_adaylari), chunk_size):
             chunk = ozel_katalizor_adaylari[i:i + chunk_size]
-            msg = f"💎 <b>[ÖZEL KATALİZÖR AVCISI - {scan_time}]</b>\n───────────────────\n\n"
+            msg = f"💎 <b>[TAVAN SERİSİ / DİP DÖNÜŞ AVCISI - {scan_time}]</b>\n───────────────────\n\n"
             for aday in chunk:
                 vol_str = format_compact_volume(aday['volume'])
                 msg += f"🔹 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> (<b>%{aday['change']:+.2f}</b>)\n"
-                msg += f"├ <b>Hacim:</b> {vol_str}\n"
-                msg += f"├ <b>Derece:</b> {aday['rating']}\n"
-                msg += f"└ <b>Strateji:</b> {aday['strategy']}\n"
+                msg += f"├ <b>Hacim:</b> {vol_str} | <b>RelVol:</b> {aday['rel_vol']:.1f}x\n"
+                msg += f"├ <b>🎯 TP:</b> <code>{aday['tp']:.2f} TL</code> | <b>🛑 SL:</b> <code>{aday['sl']:.2f} TL</code>\n"
+                msg += f"└ <b>Sinyal:</b> {aday['strategy']}\n"
                 if aday['link']:
-                    msg += f"   🔗 <a href='{aday['link']}'>Habere Git</a>\n"
+                    msg += f"   🔗 <a href='{aday['link']}'>KAP Haberine Git</a>\n"
                 msg += "\n"
             send_telegram_msg(msg)
             time.sleep(1)
 
-    # 🛡️ DİP AVCISI
-    if dip_avcisi_adaylari and scan_time != "23:00":
-        dip_avcisi_adaylari.sort(key=lambda x: x["rsi"])
-        chunk_size = 15
-        for i in range(0, len(dip_avcisi_adaylari), chunk_size):
-            chunk = dip_avcisi_adaylari[i:i + chunk_size]
-            msg = f"🛡️ <b>[DİP AVCISI - {scan_time}]</b>\n───────────────────\n\n"
-            for aday in chunk:
-                msg += f"🔹 <b>#{aday['symbol']}</b> | <b>{aday['price']:.2f} TL</b> | RSI: <b>{aday['rsi']:.1f}</b> {aday['stars']}\n"
-            send_telegram_msg(msg)
-            time.sleep(1)
-
-    # 📊 +%5 GÜN İÇİ LİSTESİ (Kısa Hacim Formatı İle Tek Satır Garanti)
+    # 📊 YÜKSELEN HACİMLİ HİSSELERE GENEL BAKIŞ
     if top_gainers and scan_time != "23:00":
         top_gainers.sort(key=lambda x: x[1], reverse=True)
         chunk_size = 25
         for i in range(0, len(top_gainers), chunk_size):
             chunk = top_gainers[i:i + chunk_size]
-            gainer_msg = f"🌟 <b>[+%5 VE ÜZERİ YÜKSELENLER - {scan_time}]</b>\n───────────────────\n\n"
-            for sym, chg, prc, vol in chunk:
+            gainer_msg = f"🌟 <b>[DİPTEN KALKAN HACİMLİLER - {scan_time}]</b>\n───────────────────\n\n"
+            for sym, chg, prc, vol, rel_vol, rsi_w, sl, tp in chunk:
                 vol_str = format_compact_volume(vol)
-                gainer_msg += f"📈 <b>#{sym}</b> | <b>{prc:.2f} TL</b> (+%{chg:.2f}) | <b>{vol_str}</b>\n"
+                gainer_msg += f"📈 <b>#{sym}</b> | <b>{prc:.2f} TL</b> (+%{chg:.2f})\n"
+                gainer_msg += f"  └ 🎯 TP: <code>{tp:.2f}</code> | 🛑 SL: <code>{sl:.2f}</code> | Vol: <b>{vol_str}</b>\n"
             send_telegram_msg(gainer_msg)
             time.sleep(1)
 
@@ -369,9 +392,16 @@ def main():
     current_time_str = now.strftime("%H:%M")
     
     send_telegram_msg(
-        "🤖 <b>BİST BOTU BAŞLATILDI</b>\n"
-        "⏰ Gün İçi: <b>09:50, 10:10, 17:45</b> | Gece: <b>23:00</b>\n"
-        "🚀 <i>Sistemin çalıştığını teyit etmek için anlık piyasa taranıyor... Lütfen bekleyin.</i>"
+        "🤖 <b>BİST BOTU BAŞLATILDI (ATR SEVİYELERİ EKLENDİ)</b>\n"
+        "🎯 Filtreler:\n"
+        " ├ 1. Günü Artı Kapatma\n"
+        " ├ 2. Hacim > 20M TL\n"
+        " ├ 3. Göreceli Hacim > 1.5x\n"
+        " ├ 4. Haftalık RSI Dip (<=35)\n"
+        " ├ 5. Haftalık Stokastik Kesişimi (K > D)\n"
+        " └ 6. 🛑 SL: -1.5x ATR | 🎯 TP: +3x ATR\n"
+        "⏰ Alarm Saatleri: <b>09:50, 10:10, 17:45, 23:00</b>\n"
+        "🚀 <i>Anlık piyasa taranıyor... Lütfen bekleyin.</i>"
     )
 
     try:
