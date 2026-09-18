@@ -4,3 +4,5 @@ yfinance
 tradingview-ta
 feedparser
 requests
+pandas
+pandas_ta
