@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BIST Dip + Hacim Avcısı Botu v2
+BIST Dip + Hacim Avcısı Botu v2.1
 Strateji:
-- RSI dip (Günlük < 35 + Haftalık < 42)  → 2-3 günlük kâr potansiyeli için
+- RSI dip (Günlük < 35 + Haftalık < 42) → 2-3 günlük kâr potansiyeli
 - Stochastic hem dipte hem kesişim (K, D'yi yukarı kesiyor)
 - Hacim ≥ 20 Milyon TL
 - Gün içi mutlaka pozitif (%)
-- RVOL ≥ 1.5
+- Göreceli Hacim (RVOL) ≥ 1.5
 - KAP haberi varsa eklenir
-- %5 üzeri yükselenler ayrı listelenir
+- %5 üzeri yükselen hisseler ayrı listelenir
+
+Yeni (v2.1):
+- Saatlik ekonomi / piyasa haber takibi
+- Hisse ve kripto piyasalarını olumsuz etkileyecek haber olursa ACİL UYARI
 """
 
 import os
@@ -135,6 +139,34 @@ FULL_BIST_LIST = [
 PROCESSED_KAP_LINKS = set()
 SCANNED_TIMES_TODAY = set()
 ACTIVE_KAP_SIGNALS = {}
+PROCESSED_NEWS_TITLES = set()
+LAST_NEWS_CHECK = 0
+
+NEGATIVE_KEYWORDS = [
+    "crash", "collapse", "recession", "crisis", "panic", "sell-off", "selloff",
+    "market plunge", "stocks fall", "stocks drop", "sharp decline", "tumbling",
+    "bear market", "correction", "volatility spike", "risk-off",
+    "rate hike", "interest rate increase", "fed hikes", "tcmb faiz", "faiz artırımı",
+    "hawkish", "tightening", "quantitative tightening",
+    "war", "invasion", "missile", "attack", "escalation", "sanctions", "embargo",
+    "savaş", "saldırı", "yaptırım", "gerilim",
+    "crypto ban", "bitcoin ban", "sec charges", "exchange hack", "hacked",
+    "stablecoin depeg", "ftx", "bankruptcy", "insolvency", "liquidation cascade",
+    "kripto yasağı", "borsa hack",
+    "inflation surge", "stagflation", "default", "debt ceiling", "bank failure",
+    "bankacılık krizi", "enflasyon şoku", "temerrüt",
+    "kur şoku", "döviz krizi", "sermaye kontrolü", "yeni vergi", "ek vergi",
+    "bakan istifa", "erken seçim", "siyasi kriz",
+]
+
+NEWS_FEEDS = [
+    "https://feeds.bloomberg.com/markets/news.rss",
+    "https://www.investing.com/rss/news_25.rss",
+    "https://www.investing.com/rss/news_301.rss",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://www.reutersagency.com/feed/?taxonomy=best-topics&post_type=best",
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+]
 
 # ============================================================
 # YARDIMCI
@@ -252,7 +284,81 @@ def get_kap_news_api(symbol):
 
 
 # ============================================================
-# ANALİZ (KESİN KURALLAR)
+# SAATLİK EKONOMİ / PİYASA HABER TAKİBİ + ACİL UYARI
+# ============================================================
+def is_negative_news(title: str, summary: str = "") -> bool:
+    text = (title + " " + summary).lower()
+    return any(kw in text for kw in NEGATIVE_KEYWORDS)
+
+
+def check_market_news():
+    global PROCESSED_NEWS_TITLES, LAST_NEWS_CHECK
+
+    now = time.time()
+    if now - LAST_NEWS_CHECK < 55 * 60:
+        return
+    LAST_NEWS_CHECK = now
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Saatlik piyasa haber taraması...")
+    negative_found = []
+
+    for feed_url in NEWS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries[:12]:
+                title = getattr(entry, "title", "") or ""
+                summary = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+                link = getattr(entry, "link", "") or ""
+
+                title_key = title.strip().lower()[:120]
+                if not title_key or title_key in PROCESSED_NEWS_TITLES:
+                    continue
+
+                if is_negative_news(title, summary):
+                    PROCESSED_NEWS_TITLES.add(title_key)
+                    negative_found.append({
+                        "title": title,
+                        "summary": summary[:180] if summary else "",
+                        "link": link
+                    })
+        except Exception as e:
+            print(f"[News Feed Hata] {feed_url[:50]}... → {e}")
+
+    if len(PROCESSED_NEWS_TITLES) > 400:
+        PROCESSED_NEWS_TITLES = set(list(PROCESSED_NEWS_TITLES)[-200:])
+
+    if not negative_found:
+        print("Negatif haber bulunamadı.")
+        return
+
+    for item in negative_found[:5]:
+        msg = (
+            f"🚨🚨 <b>ACİL PİYASA UYARISI</b> 🚨🚨\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Hisse ve Kripto piyasalarını olumsuz etkileyebilecek haber tespit edildi!</b>\n\n"
+            f"📰 <b>{item['title']}</b>\n"
+        )
+        if item["summary"]:
+            msg += f"\n📝 {item['summary']}...\n"
+        if item["link"]:
+            msg += f"\n🔗 <a href='{item['link']}'>Haberi Oku</a>\n"
+        msg += (
+            f"\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔇 <i>Pozisyonlarınızı gözden geçirin. Risk yönetimi uygulayın.</i>\n"
+            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        send_telegram_msg(msg)
+        time.sleep(1.5)
+
+    if len(negative_found) > 5:
+        send_telegram_msg(
+            f"⚠️ Bu saatte toplam <b>{len(negative_found)}</b> negatif haber tespit edildi. "
+            f"İlk 5 tanesi gönderildi."
+        )
+
+
+# ============================================================
+# ANALİZ
 # ============================================================
 def analyze_ticker(symbol):
     try:
@@ -263,15 +369,17 @@ def analyze_ticker(symbol):
         if df_d is None or df_w is None or len(df_d) < 30 or len(df_w) < 14:
             return None
 
-        # RSI
-        rsi_d = safe_float(df_d.ta.rsi(length=14).iloc[-1])
-        rsi_w = safe_float(df_w.ta.rsi(length=14).iloc[-1])
+        rsi_d_series = df_d.ta.rsi(length=14)
+        rsi_w_series = df_w.ta.rsi(length=14)
+        if rsi_d_series is None or rsi_w_series is None or rsi_d_series.empty or rsi_w_series.empty:
+            return None
+        rsi_d = safe_float(rsi_d_series.iloc[-1])
+        rsi_w = safe_float(rsi_w_series.iloc[-1])
         if np.isnan(rsi_d) or np.isnan(rsi_w):
             return None
 
-        # Stochastic
         stoch = df_d.ta.stoch(k=14, d=3, smooth_k=3)
-        if stoch is None or stoch.empty:
+        if stoch is None or stoch.empty or len(stoch) < 2:
             return None
 
         k_col = next((c for c in stoch.columns if "STOCHk" in c.upper()), None)
@@ -287,27 +395,24 @@ def analyze_ticker(symbol):
         if any(np.isnan(x) for x in [k_now, d_now, k_prev, d_prev]):
             return None
 
-        # Stochastic: hem dipte hem kesişim (K, D'yi yukarı kesiyor)
         stoch_dip = k_now < 25 and d_now < 30
         stoch_cross = (k_prev <= d_prev) and (k_now > d_now)
 
         if not (stoch_dip and stoch_cross):
             return None
 
-        # Fiyat
         close = safe_float(df_d["Close"].iloc[-1])
         prev = safe_float(df_d["Close"].iloc[-2])
         if np.isnan(close) or np.isnan(prev) or prev <= 0:
             return None
 
         change_pct = ((close - prev) / prev) * 100
-        if change_pct <= 0:                    # Gün içi mutlaka pozitif
+        if change_pct <= 0:
             return None
 
-        # Hacim
         vol = safe_float(df_d["Volume"].iloc[-1], 0)
         hacim_tl = vol * close
-        if hacim_tl < 20_000_000:              # 20 Milyon TL altı elenir
+        if hacim_tl < 20_000_000:
             return None
 
         avg10 = safe_float(df_d["Volume"].iloc[-11:-1].mean(), 0)
@@ -315,23 +420,22 @@ def analyze_ticker(symbol):
         if rvol < 1.5:
             return None
 
-        # RSI dip şartı (2-3 günlük kâr potansiyeli için)
         if not (rsi_d < 35 and rsi_w < 42):
             return None
 
-        # ATR & SL/TP
-        atr = safe_float(df_d.ta.atr(length=14).iloc[-1], close * 0.02)
+        atr_series = df_d.ta.atr(length=14)
+        if atr_series is None or atr_series.empty:
+            atr = close * 0.02
+        else:
+            atr = safe_float(atr_series.iloc[-1], close * 0.02)
         sl = max(0.01, close - 1.5 * atr)
         tp = close + 3.0 * atr
 
-        # Tahta
         avg20 = safe_float(df_d["Volume"].iloc[-20:].mean(), 0)
         tahta = "⚠️ Sığ Tahta" if avg20 < 500_000 else "🟢 Likit Tahta"
 
-        # KAP
         kap_ozeti, kap_onemli = get_kap_news_api(symbol)
 
-        # Yıldız
         yildiz = 3
         if rvol >= 2.5: yildiz += 1
         if rsi_d < 25: yildiz += 1
@@ -376,17 +480,14 @@ def scan_bist_stocks(symbol_list, scan_time):
         send_telegram_msg(f"ℹ️ <b>{scan_time}</b>: Kriterlere uyan hisse bulunamadı.")
         return
 
-    # İki ayrı liste
     dip_listesi = [x for x in sonuclar if not x["yukari5"]]
     yukari5_listesi = [x for x in sonuclar if x["yukari5"]]
 
-    # Sıralama
     dip_listesi.sort(key=lambda x: (x["kap_onemli"], x["rvol"]), reverse=True)
     yukari5_listesi.sort(key=lambda x: x["change_pct"], reverse=True)
 
     baslik = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMA"
 
-    # ---------- 1) %5 ÜZERİ LİSTESİ ----------
     if yukari5_listesi:
         msg = f"🚀 <b>[%5+ YÜKSELENLER | {baslik}]</b>\n"
         msg += f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
@@ -409,7 +510,6 @@ def scan_bist_stocks(symbol_list, scan_time):
         if msg.strip():
             send_telegram_msg(msg)
 
-    # ---------- 2) DİP + STOCH KESİŞİM LİSTESİ ----------
     if dip_listesi:
         msg = f"🎯 <b>[DİP + STOCH KESİŞİM | {baslik}]</b>\n"
         msg += f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
@@ -432,7 +532,6 @@ def scan_bist_stocks(symbol_list, scan_time):
         if msg.strip():
             send_telegram_msg(msg)
 
-    # Özet
     send_telegram_msg(
         f"📊 <b>Tarama Özeti ({scan_time})</b>\n"
         f"• Toplam sinyal: {len(sonuclar)}\n"
@@ -446,19 +545,22 @@ def scan_bist_stocks(symbol_list, scan_time):
 # ============================================================
 def main():
     send_telegram_msg(
-        "🤖 <b>BİST BOTU v2 BAŞLATILDI</b>\n"
+        "🤖 <b>BİST BOTU v2.1 BAŞLATILDI</b>\n"
         "📌 Strateji:\n"
-        "• RSI dip (Günlük < 35 + Haftalık < 42) → 2-3 günlük kâr potansiyeli\n"
+        "• RSI dip (Günlük < 35 + Haftalık < 42)\n"
         "• Stochastic dip + kesişim\n"
         "• Hacim ≥ 20M TL | RVOL ≥ 1.5\n"
         "• Gün içi mutlaka pozitif\n"
         "• %5 üzeri hisseler ayrı listelenir\n"
-        "• KAP haberi varsa eklenir\n"
-        "⏰ 09:50 | 10:10 | 17:45 | 23:00"
+        "• KAP haberi varsa eklenir\n\n"
+        "🚨 <b>Yeni:</b> Saatlik piyasa haber takibi aktif\n"
+        "→ Hisse & Kripto için olumsuz haber olursa ACİL UYARI gönderilir\n"
+        "⏰ Tarama: 09:50 | 10:10 | 17:45 | 23:00"
     )
 
     try:
         check_kap_news()
+        check_market_news()
         hisseler = get_all_bist_tickers()
         scan_bist_stocks(hisseler[:10], "AÇILIŞ TESTİ")
         send_telegram_msg("✅ Açılış testi bitti. Saatler bekleniyor.")
@@ -473,6 +575,7 @@ def main():
             key = f"{d}_{t}"
 
             check_kap_news()
+            check_market_news()
 
             if t in TARGET_SCAN_TIMES and key not in SCANNED_TIMES_TODAY:
                 hisseler = get_all_bist_tickers()
@@ -483,6 +586,8 @@ def main():
                     ACTIVE_KAP_SIGNALS.clear()
                     PROCESSED_KAP_LINKS.clear()
                     SCANNED_TIMES_TODAY.clear()
+                    if len(PROCESSED_NEWS_TITLES) > 100:
+                        PROCESSED_NEWS_TITLES.clear()
 
             time.sleep(30)
         except KeyboardInterrupt:
