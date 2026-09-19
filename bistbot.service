@@ -1,1 +1,17 @@
+[Unit]
+Description=BIST Tabandan Donus Telegram Bot
+After=network-online.target
+Wants=network-online.target
 
+[Service]
+Type=simple
+WorkingDirectory=/opt/bistbot
+EnvironmentFile=/opt/bistbot/.env
+ExecStart=/opt/bistbot/venv/bin/python /opt/bistbot/bot.py
+Restart=always
+RestartSec=10
+User=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
