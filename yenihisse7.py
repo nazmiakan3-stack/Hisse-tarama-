@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BIST Dip + Hacim Avcısı Botu v2.1
+BIST Dip + Hacim Avcısı Botu v2.2
 Strateji:
-- RSI dip (Günlük < 35 + Haftalık < 42) → 2-3 günlük kâr potansiyeli
-- Stochastic hem dipte hem kesişim (K, D'yi yukarı kesiyor)
-- Hacim ≥ 20 Milyon TL
-- Gün içi mutlaka pozitif (%)
-- Göreceli Hacim (RVOL) ≥ 1.5
-- KAP haberi varsa eklenir
-- %5 üzeri yükselen hisseler ayrı listelenir
-
-Yeni (v2.1):
-- Saatlik ekonomi / piyasa haber takibi
-- Hisse ve kripto piyasalarını olumsuz etkileyecek haber olursa ACİL UYARI
+- 1. Liste: RSI dip + Stochastic Kesişim
+- 2. Liste: %5 ve Üzeri Yükselenler
+- 3. Liste: Hacim > 20M TL & RVOL > 1.5 (Artı Pozisyon)
+- Tüm listelerde 14 Günlük ATR bazlı (SL: 1.5x, TP: 3x) seviyeler ve KAP haberleri.
+- Saatlik ekonomi / piyasa haber takibi (Acil Uyarı Sistemi)
 """
 
 import os
@@ -36,7 +30,7 @@ except ModuleNotFoundError as e:
     exit(1)
 
 # ============================================================
-# HEALTH CHECK (Render / UptimeRobot)
+# HEALTH CHECK (Render / VPS vb.)
 # ============================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -79,6 +73,7 @@ BIST_30_SET = {
     "SASA", "SISE", "TCELL", "THYAO", "TOASO", "TUPRS",
 }
 
+# (BIST Listesinin geri kalanı yer kaplamaması için kısaltılmamıştır, orijinal listeniz kullanılıyor)
 FULL_BIST_LIST = [
     "A1CAP", "AAVTUR", "ACSEL", "ADEL", "ADESE", "ADGYO", "AEFES", "AFYON", "AGESA", "AGHOL",
     "AGROT", "AHGAZ", "AKBNK", "AKCNS", "AKENR", "AKFGY", "AKFYE", "AKGRT", "AKMGY", "AKSA",
@@ -182,7 +177,6 @@ def safe_float(value, default=np.nan):
     except (TypeError, ValueError):
         return default
 
-
 def send_telegram_msg(message):
     if TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN" or not TELEGRAM_BOT_TOKEN:
         print(f"\n[TELEGRAM]:\n{message}\n")
@@ -199,7 +193,6 @@ def send_telegram_msg(message):
     except Exception as e:
         print(f"[Telegram Hata] {e}")
 
-
 def format_compact_volume(v):
     try:
         v = float(v)
@@ -210,7 +203,6 @@ def format_compact_volume(v):
         return str(int(v))
     except Exception:
         return "0"
-
 
 def get_all_bist_tickers():
     try:
@@ -227,9 +219,8 @@ def get_all_bist_tickers():
         print(f"[Hisse Listesi] {e}")
     return sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
 
-
 # ============================================================
-# KAP
+# KAP & HABER MODÜLLERİ
 # ============================================================
 def check_kap_news():
     global PROCESSED_KAP_LINKS, ACTIVE_KAP_SIGNALS
@@ -262,7 +253,6 @@ def check_kap_news():
     except Exception as e:
         print(f"[KAP RSS] {e}")
 
-
 def get_kap_news_api(symbol):
     onemli = ["yeni iş ilişkisi", "ihale", "finansal rapor", "bilanço",
               "kar payı", "sermaye artırımı", "pay alım", "birleşme", "bedelsiz"]
@@ -278,22 +268,12 @@ def get_kap_news_api(symbol):
                 full = f"{baslik} {ozet}".lower()
                 is_imp = any(k in full for k in onemli)
                 return f"{baslik}: {ozet[:55]}...", is_imp
-    except Exception as e:
-        print(f"[KAP API {symbol}] {e}")
+    except Exception:
+        pass
     return "Aktif bildirim yok", False
-
-
-# ============================================================
-# SAATLİK EKONOMİ / PİYASA HABER TAKİBİ + ACİL UYARI
-# ============================================================
-def is_negative_news(title: str, summary: str = "") -> bool:
-    text = (title + " " + summary).lower()
-    return any(kw in text for kw in NEGATIVE_KEYWORDS)
-
 
 def check_market_news():
     global PROCESSED_NEWS_TITLES, LAST_NEWS_CHECK
-
     now = time.time()
     if now - LAST_NEWS_CHECK < 55 * 60:
         return
@@ -314,51 +294,33 @@ def check_market_news():
                 if not title_key or title_key in PROCESSED_NEWS_TITLES:
                     continue
 
-                if is_negative_news(title, summary):
+                if any(kw in (title + " " + summary).lower() for kw in NEGATIVE_KEYWORDS):
                     PROCESSED_NEWS_TITLES.add(title_key)
-                    negative_found.append({
-                        "title": title,
-                        "summary": summary[:180] if summary else "",
-                        "link": link
-                    })
-        except Exception as e:
-            print(f"[News Feed Hata] {feed_url[:50]}... → {e}")
+                    negative_found.append({"title": title, "summary": summary[:180] if summary else "", "link": link})
+        except Exception:
+            pass
 
     if len(PROCESSED_NEWS_TITLES) > 400:
         PROCESSED_NEWS_TITLES = set(list(PROCESSED_NEWS_TITLES)[-200:])
 
     if not negative_found:
-        print("Negatif haber bulunamadı.")
         return
 
     for item in negative_found[:5]:
-        msg = (
-            f"🚨🚨 <b>ACİL PİYASA UYARISI</b> 🚨🚨\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>Hisse ve Kripto piyasalarını olumsuz etkileyebilecek haber tespit edildi!</b>\n\n"
-            f"📰 <b>{item['title']}</b>\n"
-        )
-        if item["summary"]:
-            msg += f"\n📝 {item['summary']}...\n"
+        msg = (f"🚨🚨 <b>ACİL PİYASA UYARISI</b> 🚨🚨\n━━━━━━━━━━━━━━━━━━━━\n"
+               f"⚠️ <b>Hisse ve Kripto piyasalarını olumsuz etkileyebilecek haber tespit edildi!</b>\n\n"
+               f"📰 <b>{item['title']}</b>\n")
         if item["link"]:
             msg += f"\n🔗 <a href='{item['link']}'>Haberi Oku</a>\n"
-        msg += (
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔇 <i>Pozisyonlarınızı gözden geçirin. Risk yönetimi uygulayın.</i>\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
+        msg += f"\n━━━━━━━━━━━━━━━━━━━━\n🔇 <i>Pozisyonlarınızı gözden geçirin. Risk yönetimi uygulayın.</i>\n⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         send_telegram_msg(msg)
         time.sleep(1.5)
 
     if len(negative_found) > 5:
-        send_telegram_msg(
-            f"⚠️ Bu saatte toplam <b>{len(negative_found)}</b> negatif haber tespit edildi. "
-            f"İlk 5 tanesi gönderildi."
-        )
-
+        send_telegram_msg(f"⚠️ Bu saatte toplam <b>{len(negative_found)}</b> negatif haber tespit edildi. İlk 5 tanesi gönderildi.")
 
 # ============================================================
-# ANALİZ
+# ANALİZ MODÜLÜ (FİLTRELER DÜZELTİLDİ)
 # ============================================================
 def analyze_ticker(symbol):
     try:
@@ -369,72 +331,66 @@ def analyze_ticker(symbol):
         if df_d is None or df_w is None or len(df_d) < 30 or len(df_w) < 14:
             return None
 
-        rsi_d_series = df_d.ta.rsi(length=14)
-        rsi_w_series = df_w.ta.rsi(length=14)
-        if rsi_d_series is None or rsi_w_series is None or rsi_d_series.empty or rsi_w_series.empty:
-            return None
-        rsi_d = safe_float(rsi_d_series.iloc[-1])
-        rsi_w = safe_float(rsi_w_series.iloc[-1])
-        if np.isnan(rsi_d) or np.isnan(rsi_w):
-            return None
-
-        stoch = df_d.ta.stoch(k=14, d=3, smooth_k=3)
-        if stoch is None or stoch.empty or len(stoch) < 2:
-            return None
-
-        k_col = next((c for c in stoch.columns if "STOCHk" in c.upper()), None)
-        d_col = next((c for c in stoch.columns if "STOCHd" in c.upper()), None)
-        if not k_col or not d_col:
-            return None
-
-        k_now = safe_float(stoch[k_col].iloc[-1])
-        d_now = safe_float(stoch[d_col].iloc[-1])
-        k_prev = safe_float(stoch[k_col].iloc[-2])
-        d_prev = safe_float(stoch[d_col].iloc[-2])
-
-        if any(np.isnan(x) for x in [k_now, d_now, k_prev, d_prev]):
-            return None
-
-        stoch_dip = k_now < 25 and d_now < 30
-        stoch_cross = (k_prev <= d_prev) and (k_now > d_now)
-
-        if not (stoch_dip and stoch_cross):
-            return None
-
         close = safe_float(df_d["Close"].iloc[-1])
         prev = safe_float(df_d["Close"].iloc[-2])
         if np.isnan(close) or np.isnan(prev) or prev <= 0:
             return None
 
+        # 1. TEMEL ŞART: Mutlaka pozitif pozisyonda olmalı
         change_pct = ((close - prev) / prev) * 100
         if change_pct <= 0:
-            return None
+            return None 
 
         vol = safe_float(df_d["Volume"].iloc[-1], 0)
         hacim_tl = vol * close
-        if hacim_tl < 20_000_000:
-            return None
-
         avg10 = safe_float(df_d["Volume"].iloc[-11:-1].mean(), 0)
         rvol = (vol / avg10) if avg10 > 0 else 0
-        if rvol < 1.5:
-            return None
 
-        if not (rsi_d < 35 and rsi_w < 42):
-            return None
-
+        # ATR 14 Günlük ve TP/SL Hesaplaması (Tüm Listeler İçin Geçerli)
         atr_series = df_d.ta.atr(length=14)
         if atr_series is None or atr_series.empty:
             atr = close * 0.02
         else:
             atr = safe_float(atr_series.iloc[-1], close * 0.02)
+        
         sl = max(0.01, close - 1.5 * atr)
         tp = close + 3.0 * atr
+
+        # İndikatör Hesaplamaları
+        rsi_d_series = df_d.ta.rsi(length=14)
+        rsi_w_series = df_w.ta.rsi(length=14)
+        rsi_d = safe_float(rsi_d_series.iloc[-1]) if rsi_d_series is not None else 50
+        rsi_w = safe_float(rsi_w_series.iloc[-1]) if rsi_w_series is not None else 50
+
+        stoch = df_d.ta.stoch(k=14, d=3, smooth_k=3)
+        stoch_dip, stoch_cross, k_now = False, False, 50
+        
+        if stoch is not None and not stoch.empty and len(stoch) >= 2:
+            k_col = next((c for c in stoch.columns if "STOCHk" in c.upper()), None)
+            d_col = next((c for c in stoch.columns if "STOCHd" in c.upper()), None)
+            if k_col and d_col:
+                k_now = safe_float(stoch[k_col].iloc[-1])
+                d_now = safe_float(stoch[d_col].iloc[-1])
+                k_prev = safe_float(stoch[k_col].iloc[-2])
+                d_prev = safe_float(stoch[d_col].iloc[-2])
+                stoch_dip = (k_now < 25 and d_now < 30)
+                stoch_cross = (k_prev <= d_prev) and (k_now > d_now)
 
         avg20 = safe_float(df_d["Volume"].iloc[-20:].mean(), 0)
         tahta = "⚠️ Sığ Tahta" if avg20 < 500_000 else "🟢 Likit Tahta"
 
         kap_ozeti, kap_onemli = get_kap_news_api(symbol)
+
+        # ----------------------------------------------------
+        # KATEGORİ BAYRAKLARI (Artık bağımsız çalışıyorlar)
+        # ----------------------------------------------------
+        is_hacimli = (hacim_tl >= 20_000_000) and (rvol >= 1.5)
+        is_yukari5 = change_pct >= 5.0
+        is_dip_stoch = (rsi_d < 35 and rsi_w < 42) and stoch_dip and stoch_cross
+
+        # HİÇBİR KRİTERE UYMUYORSA ELEYELİM
+        if not (is_yukari5 or is_dip_stoch or is_hacimli):
+            return None
 
         yildiz = 3
         if rvol >= 2.5: yildiz += 1
@@ -456,16 +412,16 @@ def analyze_ticker(symbol):
             "kap_ozeti": kap_ozeti,
             "kap_onemli": kap_onemli,
             "yildizlar": yildizlar,
-            "yukari5": change_pct >= 5.0
+            "is_yukari5": is_yukari5,
+            "is_dip_stoch": is_dip_stoch,
+            "is_hacimli": is_hacimli
         }
 
-    except Exception as e:
-        print(f"[Analiz {symbol}] {type(e).__name__}: {e}")
+    except Exception:
         return None
 
-
 # ============================================================
-# TARAMA + İKİ LİSTE
+# TARAMA + ÜÇ LİSTE KONTROLÜ
 # ============================================================
 def scan_bist_stocks(symbol_list, scan_time):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama başladı → {scan_time}")
@@ -480,26 +436,25 @@ def scan_bist_stocks(symbol_list, scan_time):
         send_telegram_msg(f"ℹ️ <b>{scan_time}</b>: Kriterlere uyan hisse bulunamadı.")
         return
 
-    dip_listesi = [x for x in sonuclar if not x["yukari5"]]
-    yukari5_listesi = [x for x in sonuclar if x["yukari5"]]
+    # Kategori Ayrıştırması (Aynı hisse birden fazla listeye girmesin diye önceliklendirdik)
+    yukari5_listesi = [x for x in sonuclar if x["is_yukari5"]]
+    dip_listesi = [x for x in sonuclar if x["is_dip_stoch"] and not x["is_yukari5"]]
+    hacim_listesi = [x for x in sonuclar if x["is_hacimli"] and not x["is_yukari5"] and not x["is_dip_stoch"]]
 
-    dip_listesi.sort(key=lambda x: (x["kap_onemli"], x["rvol"]), reverse=True)
     yukari5_listesi.sort(key=lambda x: x["change_pct"], reverse=True)
+    dip_listesi.sort(key=lambda x: (x["kap_onemli"], x["rvol"]), reverse=True)
+    hacim_listesi.sort(key=lambda x: x["rvol"], reverse=True)
 
     baslik = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMA"
 
+    # LİSTE 1: %5 ÜZERİ YÜKSELENLER
     if yukari5_listesi:
-        msg = f"🚀 <b>[%5+ YÜKSELENLER | {baslik}]</b>\n"
-        msg += f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-        msg += f"🔢 Adet: <b>{len(yukari5_listesi)}</b>\n\n"
-
+        msg = f"🚀 <b>[%5+ YÜKSELENLER | {baslik}]</b>\n📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n🔢 Adet: <b>{len(yukari5_listesi)}</b>\n\n"
         for it in yukari5_listesi:
             kap_emoji = "🚨" if it["kap_onemli"] else ""
             msg += (
-                f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> "
-                f"<b>(%+{it['change_pct']})</b> {kap_emoji} {it['yildizlar']}\n"
-                f"├ RSI: {it['rsi_d']} | Stoch: {it['stoch_k']} | RVOL: {it['rvol']}x\n"
-                f"├ Hacim: {it['hacim_tl']} TL | {it['tahta']}\n"
+                f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> <b>(%+{it['change_pct']})</b> {kap_emoji} {it['yildizlar']}\n"
+                f"├ RVOL: {it['rvol']}x | Hacim: {it['hacim_tl']} TL\n"
                 f"├ 🛑 SL: {it['sl']} | 🎯 TP: {it['tp']}\n"
                 f"└ KAP: <i>{it['kap_ozeti']}</i>\n\n"
             )
@@ -507,21 +462,16 @@ def scan_bist_stocks(symbol_list, scan_time):
                 send_telegram_msg(msg)
                 msg = ""
                 time.sleep(1)
-        if msg.strip():
-            send_telegram_msg(msg)
+        if msg.strip(): send_telegram_msg(msg)
 
+    # LİSTE 2: DİP DÖNÜŞÜ
     if dip_listesi:
-        msg = f"🎯 <b>[DİP + STOCH KESİŞİM | {baslik}]</b>\n"
-        msg += f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-        msg += f"🔢 Adet: <b>{len(dip_listesi)}</b>\n\n"
-
+        msg = f"🎯 <b>[DİP + STOCH KESİŞİM | {baslik}]</b>\n📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n🔢 Adet: <b>{len(dip_listesi)}</b>\n\n"
         for it in dip_listesi:
             kap_emoji = "🚨" if it["kap_onemli"] else ""
             msg += (
-                f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> "
-                f"(%+{it['change_pct']}) {kap_emoji} {it['yildizlar']}\n"
-                f"├ RSI: {it['rsi_d']} | Stoch K/D kesişim ✓ | RVOL: {it['rvol']}x\n"
-                f"├ Hacim: {it['hacim_tl']} TL | {it['tahta']}\n"
+                f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> (%+{it['change_pct']}) {kap_emoji} {it['yildizlar']}\n"
+                f"├ RSI: {it['rsi_d']} | Stoch K/D kesişim ✓\n"
                 f"├ 🛑 SL: {it['sl']} | 🎯 TP: {it['tp']}\n"
                 f"└ KAP: <i>{it['kap_ozeti']}</i>\n\n"
             )
@@ -529,32 +479,45 @@ def scan_bist_stocks(symbol_list, scan_time):
                 send_telegram_msg(msg)
                 msg = ""
                 time.sleep(1)
-        if msg.strip():
-            send_telegram_msg(msg)
+        if msg.strip(): send_telegram_msg(msg)
+
+    # LİSTE 3: HACİM AVCISI (Yeni eklenen madde)
+    if hacim_listesi:
+        msg = f"🌊 <b>[GÜÇLÜ HACİM (20M+ & RVOL 1.5+) | {baslik}]</b>\n📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n🔢 Adet: <b>{len(hacim_listesi)}</b>\n\n"
+        for it in hacim_listesi:
+            kap_emoji = "🚨" if it["kap_onemli"] else ""
+            msg += (
+                f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> (%+{it['change_pct']}) {kap_emoji}\n"
+                f"├ RVOL: {it['rvol']}x | Hacim: {it['hacim_tl']} TL | {it['tahta']}\n"
+                f"├ 🛑 SL (1.5x ATR): <b>{it['sl']}</b> | 🎯 TP (3x ATR): <b>{it['tp']}</b>\n"
+                f"└ KAP: <i>{it['kap_ozeti']}</i>\n\n"
+            )
+            if len(msg) > 3800:
+                send_telegram_msg(msg)
+                msg = ""
+                time.sleep(1)
+        if msg.strip(): send_telegram_msg(msg)
 
     send_telegram_msg(
         f"📊 <b>Tarama Özeti ({scan_time})</b>\n"
         f"• Toplam sinyal: {len(sonuclar)}\n"
         f"• %5 üzeri: {len(yukari5_listesi)}\n"
-        f"• Dip + Stoch kesişim: {len(dip_listesi)}"
+        f"• Dip + Stoch: {len(dip_listesi)}\n"
+        f"• Güçlü Hacim: {len(hacim_listesi)}"
     )
-
 
 # ============================================================
 # ANA DÖNGÜ
 # ============================================================
 def main():
     send_telegram_msg(
-        "🤖 <b>BİST BOTU v2.1 BAŞLATILDI</b>\n"
+        "🤖 <b>BİST BOTU v2.2 BAŞLATILDI</b>\n"
         "📌 Strateji:\n"
-        "• RSI dip (Günlük < 35 + Haftalık < 42)\n"
-        "• Stochastic dip + kesişim\n"
-        "• Hacim ≥ 20M TL | RVOL ≥ 1.5\n"
-        "• Gün içi mutlaka pozitif\n"
-        "• %5 üzeri hisseler ayrı listelenir\n"
-        "• KAP haberi varsa eklenir\n\n"
-        "🚨 <b>Yeni:</b> Saatlik piyasa haber takibi aktif\n"
-        "→ Hisse & Kripto için olumsuz haber olursa ACİL UYARI gönderilir\n"
+        "• 1. Liste: RSI dip + Stochastic Kesişim\n"
+        "• 2. Liste: %5 ve Üzeri Yükselenler (Ayrıştırıldı)\n"
+        "• 3. Liste: Hacim > 20M TL & RVOL > 1.5 (Artı Pozisyon)\n"
+        "• 🛑 SL: -1.5x ATR | 🎯 TP: +3x ATR tüm hisselere eklendi\n"
+        "• 🚨 KAP Haber Takibi & Acil Piyasa Uyarı Sistemi AKTİF\n"
         "⏰ Tarama: 09:50 | 10:10 | 17:45 | 23:00"
     )
 
@@ -595,7 +558,6 @@ def main():
         except Exception as e:
             print(f"[Döngü] {e}")
             time.sleep(30)
-
 
 if __name__ == "__main__":
     main()
