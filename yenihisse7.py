@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BIST Dip + Hacim Avcısı Botu v2.2
+BIST Dip + Hacim Avcısı Botu v2.4
 Strateji:
-- 1. Liste: RSI dip + Stochastic Kesişim
+- Günlük Tarih & Cache Kontrolü (Tekrar eden bildirimler engellendi)
+- Göreceli Hacim (RVOL): Son 10 günün ortalamasının en az 1.5 katı
+- 1. Liste: RSI dip + Haftalık RSI yukarı yönlü hareket (dipten dönüş) + Stochastic Kesişim
 - 2. Liste: %5 ve Üzeri Yükselenler
-- 3. Liste: Hacim > 20M TL & RVOL > 1.5 (Artı Pozisyon)
-- Tüm listelerde 14 Günlük ATR bazlı (SL: 1.5x, TP: 3x) seviyeler ve KAP haberleri.
-- Saatlik ekonomi / piyasa haber takibi (Acil Uyarı Sistemi)
+- 3. Liste: Güçlü Hacim (Hacim > 20M TL & RVOL ≥ 1.5 & Artı Pozisyon)
+- Yıldız Sistemi: Göreceli Hacim (RVOL) ve KAP haberlerine göre dinamik
+- SL: 1.5x ATR | TP: 3x ATR (14 Günlük)
 """
 
 import os
@@ -59,11 +61,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
 
 KAP_STAR_MAP = {
-    "bedelsiz": ("⭐⭐⭐⭐⭐", "Yüksek Oranlı Bedelsiz / Sermaye Artırımı"),
-    "yeni iş ilişkisi": ("⭐⭐⭐⭐⭐", "Yeni İş İlişkisi / Dev İhale"),
-    "ortaklık": ("⭐⭐⭐⭐⭐", "Stratejik İş Ortaklığı / M&A"),
-    "ihale": ("⭐⭐⭐⭐", "İhale Sözleşmesi / Dev Sipariş"),
-    "pay alım": ("⭐⭐⭐⭐", "Şirket Pay Geri Alımı"),
+    "bedelsiz": ("⭐⭐⭐⭐⭐", "Yüksek Oranlı Bedelsiz / Sermaye Artırımı", 5),
+    "yeni iş ilişkisi": ("⭐⭐⭐⭐⭐", "Yeni İş İlişkisi / Dev İhale", 5),
+    "ortaklık": ("⭐⭐⭐⭐⭐", "Stratejik İş Ortaklığı / M&A", 5),
+    "ihale": ("⭐⭐⭐⭐", "İhale Sözleşmesi / Dev Sipariş", 4),
+    "pay alım": ("⭐⭐⭐⭐", "Şirket Pay Geri Alımı", 4),
 }
 
 BIST_30_SET = {
@@ -73,7 +75,6 @@ BIST_30_SET = {
     "SASA", "SISE", "TCELL", "THYAO", "TOASO", "TUPRS",
 }
 
-# (BIST Listesinin geri kalanı yer kaplamaması için kısaltılmamıştır, orijinal listeniz kullanılıyor)
 FULL_BIST_LIST = [
     "A1CAP", "AAVTUR", "ACSEL", "ADEL", "ADESE", "ADGYO", "AEFES", "AFYON", "AGESA", "AGHOL",
     "AGROT", "AHGAZ", "AKBNK", "AKCNS", "AKENR", "AKFGY", "AKFYE", "AKGRT", "AKMGY", "AKSA",
@@ -136,6 +137,7 @@ SCANNED_TIMES_TODAY = set()
 ACTIVE_KAP_SIGNALS = {}
 PROCESSED_NEWS_TITLES = set()
 LAST_NEWS_CHECK = 0
+CURRENT_ACTIVE_DATE = datetime.now().strftime("%Y-%m-%d")
 
 NEGATIVE_KEYWORDS = [
     "crash", "collapse", "recession", "crisis", "panic", "sell-off", "selloff",
@@ -233,14 +235,14 @@ def check_kap_news():
             summary = getattr(entry, "summary", "") or ""
             content_lower = (title + " " + summary).lower()
 
-            for key, (stars, category) in KAP_STAR_MAP.items():
+            for key, (stars, category, score) in KAP_STAR_MAP.items():
                 if key in content_lower:
                     PROCESSED_KAP_LINKS.add(entry.link)
                     for symbol in FULL_BIST_LIST:
                         if symbol in title or symbol in summary:
                             ACTIVE_KAP_SIGNALS[symbol] = {
                                 "stars": stars, "category": category,
-                                "title": title, "link": entry.link
+                                "title": title, "link": entry.link, "score": score
                             }
                     send_telegram_msg(
                         f"🔥 <b>[YÜKSEK HABER DEĞERİ]</b>\n"
@@ -320,7 +322,7 @@ def check_market_news():
         send_telegram_msg(f"⚠️ Bu saatte toplam <b>{len(negative_found)}</b> negatif haber tespit edildi. İlk 5 tanesi gönderildi.")
 
 # ============================================================
-# ANALİZ MODÜLÜ (FİLTRELER DÜZELTİLDİ)
+# ANALİZ MODÜLÜ (GÜNCELLENDİ)
 # ============================================================
 def analyze_ticker(symbol):
     try:
@@ -328,7 +330,7 @@ def analyze_ticker(symbol):
         df_d = t.history(period="6mo", interval="1d")
         df_w = t.history(period="1y", interval="1wk")
 
-        if df_d is None or df_w is None or len(df_d) < 30 or len(df_w) < 14:
+        if df_d is None or df_w is None or len(df_d) < 30 or len(df_w) < 10:
             return None
 
         close = safe_float(df_d["Close"].iloc[-1])
@@ -336,17 +338,19 @@ def analyze_ticker(symbol):
         if np.isnan(close) or np.isnan(prev) or prev <= 0:
             return None
 
-        # 1. TEMEL ŞART: Mutlaka pozitif pozisyonda olmalı
+        # TEMEL ŞART: Gün içi mutlaka pozitif olmalı
         change_pct = ((close - prev) / prev) * 100
         if change_pct <= 0:
             return None 
 
         vol = safe_float(df_d["Volume"].iloc[-1], 0)
         hacim_tl = vol * close
+        
+        # GÖRECELİ HACİM (RVOL): Son 10 günlük ortalama hacme oranı (En az 1.5 katı olmalı)
         avg10 = safe_float(df_d["Volume"].iloc[-11:-1].mean(), 0)
         rvol = (vol / avg10) if avg10 > 0 else 0
 
-        # ATR 14 Günlük ve TP/SL Hesaplaması (Tüm Listeler İçin Geçerli)
+        # ATR 14 Günlük ve TP/SL Hesaplaması (SL: 1.5x ATR, TP: 3x ATR)[span_2](start_span)[span_2](end_span)
         atr_series = df_d.ta.atr(length=14)
         if atr_series is None or atr_series.empty:
             atr = close * 0.02
@@ -359,8 +363,14 @@ def analyze_ticker(symbol):
         # İndikatör Hesaplamaları
         rsi_d_series = df_d.ta.rsi(length=14)
         rsi_w_series = df_w.ta.rsi(length=14)
+        
         rsi_d = safe_float(rsi_d_series.iloc[-1]) if rsi_d_series is not None else 50
-        rsi_w = safe_float(rsi_w_series.iloc[-1]) if rsi_w_series is not None else 50
+        
+        rsi_w_now = safe_float(rsi_w_series.iloc[-1]) if rsi_w_series is not None else 50
+        rsi_w_prev = safe_float(rsi_w_series.iloc[-2]) if rsi_w_series is not None else 50
+        
+        # Haftalık RSI dipten yukarı hareket ediyor mu? (Dipten toparlanma)
+        is_weekly_rsi_recovering = rsi_w_now > rsi_w_prev
 
         stoch = df_d.ta.stoch(k=14, d=3, smooth_k=3)
         stoch_dip, stoch_cross, k_now = False, False, 50
@@ -373,7 +383,7 @@ def analyze_ticker(symbol):
                 d_now = safe_float(stoch[d_col].iloc[-1])
                 k_prev = safe_float(stoch[k_col].iloc[-2])
                 d_prev = safe_float(stoch[d_col].iloc[-2])
-                stoch_dip = (k_now < 25 and d_now < 30)
+                stoch_dip = (k_now < 30 and d_now < 35)
                 stoch_cross = (k_prev <= d_prev) and (k_now > d_now)
 
         avg20 = safe_float(df_d["Volume"].iloc[-20:].mean(), 0)
@@ -382,27 +392,35 @@ def analyze_ticker(symbol):
         kap_ozeti, kap_onemli = get_kap_news_api(symbol)
 
         # ----------------------------------------------------
-        # KATEGORİ BAYRAKLARI (Artık bağımsız çalışıyorlar)
+        # KATEGORİ BAYRAKLARI (RVOL ŞARTI: >= 1.5)
         # ----------------------------------------------------
         is_hacimli = (hacim_tl >= 20_000_000) and (rvol >= 1.5)
-        is_yukari5 = change_pct >= 5.0
-        is_dip_stoch = (rsi_d < 35 and rsi_w < 42) and stoch_dip and stoch_cross
+        is_yukari5 = (change_pct >= 5.0) and (rvol >= 1.5)
+        is_dip_stoch = (rsi_d < 40 and is_weekly_rsi_recovering and rvol >= 1.5) and (stoch_dip or stoch_cross)
 
-        # HİÇBİR KRİTERE UYMUYORSA ELEYELİM
         if not (is_yukari5 or is_dip_stoch or is_hacimli):
             return None
 
-        yildiz = 3
-        if rvol >= 2.5: yildiz += 1
-        if rsi_d < 25: yildiz += 1
-        if kap_onemli: yildiz += 1
-        yildizlar = "⭐" * min(yildiz, 5)
+        # YILDIZ SİSTEMİ (Göreceli Hacim [RVOL] ve KAP Haberlerine Göre)
+        star_score = 1
+        if rvol >= 1.5: star_score += 1
+        if rvol >= 2.5: star_score += 1
+        if rvol >= 4.0: star_score += 1
+        if kap_onemli: star_score += 1
+        
+        # Aktif KAP sinyallerinden ekstra skor kontrolü
+        if symbol in ACTIVE_KAP_SIGNALS:
+            star_score += 1
+
+        star_count = min(star_score, 5)
+        yildizlar = "⭐" * star_count
 
         return {
             "symbol": symbol,
             "fiyat": round(close, 2),
             "change_pct": round(change_pct, 2),
             "rsi_d": round(rsi_d, 1),
+            "rsi_w": round(rsi_w_now, 1),
             "stoch_k": round(k_now, 1),
             "rvol": round(rvol, 2),
             "hacim_tl": format_compact_volume(hacim_tl),
@@ -436,7 +454,6 @@ def scan_bist_stocks(symbol_list, scan_time):
         send_telegram_msg(f"ℹ️ <b>{scan_time}</b>: Kriterlere uyan hisse bulunamadı.")
         return
 
-    # Kategori Ayrıştırması (Aynı hisse birden fazla listeye girmesin diye önceliklendirdik)
     yukari5_listesi = [x for x in sonuclar if x["is_yukari5"]]
     dip_listesi = [x for x in sonuclar if x["is_dip_stoch"] and not x["is_yukari5"]]
     hacim_listesi = [x for x in sonuclar if x["is_hacimli"] and not x["is_yukari5"] and not x["is_dip_stoch"]]
@@ -454,8 +471,9 @@ def scan_bist_stocks(symbol_list, scan_time):
             kap_emoji = "🚨" if it["kap_onemli"] else ""
             msg += (
                 f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> <b>(%+{it['change_pct']})</b> {kap_emoji} {it['yildizlar']}\n"
-                f"├ RVOL: {it['rvol']}x | Hacim: {it['hacim_tl']} TL\n"
-                f"├ 🛑 SL: {it['sl']} | 🎯 TP: {it['tp']}\n"
+                f"├ RVOL (10g): {it['rvol']}x | Hacim: {it['hacim_tl']} TL\n"
+                f"├ 🛑 SL (-1.5x ATR): <code>{it['sl']} TL</code>\n"
+                f"├ 🎯 TP (+3x ATR): <code>{it['tp']} TL</code>\n"
                 f"└ KAP: <i>{it['kap_ozeti']}</i>\n\n"
             )
             if len(msg) > 3800:
@@ -464,15 +482,16 @@ def scan_bist_stocks(symbol_list, scan_time):
                 time.sleep(1)
         if msg.strip(): send_telegram_msg(msg)
 
-    # LİSTE 2: DİP DÖNÜŞÜ
+    # LİSTE 2: DİPTEN DÖNÜŞ
     if dip_listesi:
-        msg = f"🎯 <b>[DİP + STOCH KESİŞİM | {baslik}]</b>\n📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n🔢 Adet: <b>{len(dip_listesi)}</b>\n\n"
+        msg = f"🎯 <b>[DİP DÖNÜŞÜ & KESİŞİM | {baslik}]</b>\n📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n🔢 Adet: <b>{len(dip_listesi)}</b>\n\n"
         for it in dip_listesi:
             kap_emoji = "🚨" if it["kap_onemli"] else ""
             msg += (
                 f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> (%+{it['change_pct']}) {kap_emoji} {it['yildizlar']}\n"
-                f"├ RSI: {it['rsi_d']} | Stoch K/D kesişim ✓\n"
-                f"├ 🛑 SL: {it['sl']} | 🎯 TP: {it['tp']}\n"
+                f"├ Günlük RSI: {it['rsi_d']} | Haftalık RSI Toparlanma ✓ | RVOL: {it['rvol']}x\n"
+                f"├ 🛑 SL (-1.5x ATR): <code>{it['sl']} TL</code>\n"
+                f"├ 🎯 TP (+3x ATR): <code>{it['tp']} TL</code>\n"
                 f"└ KAP: <i>{it['kap_ozeti']}</i>\n\n"
             )
             if len(msg) > 3800:
@@ -481,15 +500,16 @@ def scan_bist_stocks(symbol_list, scan_time):
                 time.sleep(1)
         if msg.strip(): send_telegram_msg(msg)
 
-    # LİSTE 3: HACİM AVCISI (Yeni eklenen madde)
+    # LİSTE 3: GÜÇLÜ HACİM AVCISI
     if hacim_listesi:
         msg = f"🌊 <b>[GÜÇLÜ HACİM (20M+ & RVOL 1.5+) | {baslik}]</b>\n📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n🔢 Adet: <b>{len(hacim_listesi)}</b>\n\n"
         for it in hacim_listesi:
             kap_emoji = "🚨" if it["kap_onemli"] else ""
             msg += (
-                f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> (%+{it['change_pct']}) {kap_emoji}\n"
+                f"🔹 <b>#{it['symbol']}</b> | <b>{it['fiyat']} TL</b> (%+{it['change_pct']}) {kap_emoji} {it['yildizlar']}\n"
                 f"├ RVOL: {it['rvol']}x | Hacim: {it['hacim_tl']} TL | {it['tahta']}\n"
-                f"├ 🛑 SL (1.5x ATR): <b>{it['sl']}</b> | 🎯 TP (3x ATR): <b>{it['tp']}</b>\n"
+                f"├ 🛑 SL (-1.5x ATR): <code>{it['sl']} TL</code>\n"
+                f"├ 🎯 TP (+3x ATR): <code>{it['tp']} TL</code>\n"
                 f"└ KAP: <i>{it['kap_ozeti']}</i>\n\n"
             )
             if len(msg) > 3800:
@@ -502,7 +522,7 @@ def scan_bist_stocks(symbol_list, scan_time):
         f"📊 <b>Tarama Özeti ({scan_time})</b>\n"
         f"• Toplam sinyal: {len(sonuclar)}\n"
         f"• %5 üzeri: {len(yukari5_listesi)}\n"
-        f"• Dip + Stoch: {len(dip_listesi)}\n"
+        f"• Dip Dönüşü: {len(dip_listesi)}\n"
         f"• Güçlü Hacim: {len(hacim_listesi)}"
     )
 
@@ -511,13 +531,15 @@ def scan_bist_stocks(symbol_list, scan_time):
 # ============================================================
 def main():
     send_telegram_msg(
-        "🤖 <b>BİST BOTU v2.2 BAŞLATILDI</b>\n"
+        "🤖 <b>BİST BOTU v2.4 BAŞLATILDI</b>\n"
         "📌 Strateji:\n"
-        "• 1. Liste: RSI dip + Stochastic Kesişim\n"
-        "• 2. Liste: %5 ve Üzeri Yükselenler (Ayrıştırıldı)\n"
-        "• 3. Liste: Hacim > 20M TL & RVOL > 1.5 (Artı Pozisyon)\n"
-        "• 🛑 SL: -1.5x ATR | 🎯 TP: +3x ATR tüm hisselere eklendi\n"
-        "• 🚨 KAP Haber Takibi & Acil Piyasa Uyarı Sistemi AKTİF\n"
+        "• Günlük Tarih & Cache Kontrolü Aktif\n"
+        "• Göreceli Hacim (RVOL): Son 10 günün ortalamasının en az 1.5 katı\n"
+        "• 1. Liste: Dip + Haftalık RSI Toparlanma + Stoch\n"
+        "• 2. Liste: %5+ Yükselenler (RVOL >= 1.5)\n"
+        "• 3. Liste: Hacim > 20M TL & RVOL ≥ 1.5\n"
+        "• ⭐ Yıldızlar: Göreceli Hacim (RVOL) ve KAP'a göre verilir\n"
+        "• 🛑 SL: -1.5x ATR[span_3](start_span)[span_3](end_span) | 🎯 TP: +3x ATR[span_4](start_span)[span_4](end_span)\n"
         "⏰ Tarama: 09:50 | 10:10 | 17:45 | 23:00"
     )
 
@@ -530,12 +552,21 @@ def main():
     except Exception as e:
         send_telegram_msg(f"❌ Açılış hatası: {e}")
 
+    global CURRENT_ACTIVE_DATE, SCANNED_TIMES_TODAY, PROCESSED_NEWS_TITLES
     while True:
         try:
             now = datetime.now()
+            today_str = now.strftime("%Y-%m-%d")
+            
+            # GÜN DEĞİŞTİYSE CACHE VE TARAMA LİSTELERİNİ SIFIRLA
+            if today_str != CURRENT_ACTIVE_DATE:
+                CURRENT_ACTIVE_DATE = today_str
+                SCANNED_TIMES_TODAY.clear()
+                PROCESSED_NEWS_TITLES.clear()
+                print(f"[{now.strftime('%H:%M:%S')}] Yeni güne geçildi. Önbellekler sıfırlandı.")
+
             t = now.strftime("%H:%M")
-            d = now.strftime("%Y-%m-%d")
-            key = f"{d}_{t}"
+            key = f"{today_str}_{t}"
 
             check_kap_news()
             check_market_news()
@@ -548,9 +579,6 @@ def main():
                 if t == "23:00":
                     ACTIVE_KAP_SIGNALS.clear()
                     PROCESSED_KAP_LINKS.clear()
-                    SCANNED_TIMES_TODAY.clear()
-                    if len(PROCESSED_NEWS_TITLES) > 100:
-                        PROCESSED_NEWS_TITLES.clear()
 
             time.sleep(30)
         except KeyboardInterrupt:
