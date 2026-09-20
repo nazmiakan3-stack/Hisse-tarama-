@@ -35,7 +35,7 @@ except ModuleNotFoundError as e:
     exit(1)
 
 # ============================================================
-# RENDER / SAĞLIK KONTROLÜ
+# SAĞLIK KONTROLÜ
 # ============================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -190,7 +190,7 @@ def get_all_bist_tickers():
             }
             filtered = sorted(list(fetched))
             if len(filtered) >= 300:
-                logger.info(f"Canlı BIST listesi alındı: {len(filtered)} hisse (BIST 30 dahil)")
+                logger.info(f"Canlı BIST listesi alındı: {len(filtered)} hisse")
                 return filtered
     except Exception as e:
         logger.warning(f"Canlı liste alınamadı: {e}")
@@ -247,7 +247,7 @@ def get_kap_news_api(symbol: str):
     return "Aktif bildirim yok", False
 
 # ============================================================
-# ANA ANALİZ
+# ANA ANALİZ FONKSİYONU
 # ============================================================
 def analyze_ticker(symbol: str):
     try:
@@ -260,26 +260,6 @@ def analyze_ticker(symbol: str):
         if df_weekly is None or len(df_weekly) < 15:
             return None
 
-        rsi_daily = df_daily.ta.rsi(length=14)
-        rsi_weekly = df_weekly.ta.rsi(length=14)
-        if rsi_daily is None or rsi_weekly is None:
-            return None
-        rsi_d = float(rsi_daily.iloc[-1])
-        rsi_w = float(rsi_weekly.iloc[-1])
-
-        stoch = df_daily.ta.stoch(k=14, d=3, smooth_k=3)
-        if stoch is None or stoch.empty:
-            return None
-
-        k_col = next((c for c in stoch.columns if "STOCHk" in c), None)
-        d_col = next((c for c in stoch.columns if "STOCHd" in c), None)
-        if not k_col or not d_col:
-            return None
-
-        stoch_k = float(stoch[k_col].iloc[-1])
-        stoch_d = float(stoch[d_col].iloc[-1])
-        stoch_alimda = (stoch_k < 20) or (stoch_k > stoch_d and stoch_k < 35)
-
         last_close = float(df_daily["Close"].iloc[-1])
         prev_close = float(df_daily["Close"].iloc[-2])
         change_pct = ((last_close - prev_close) / prev_close) * 100
@@ -287,14 +267,44 @@ def analyze_ticker(symbol: str):
         last_volume = float(df_daily["Volume"].iloc[-1])
         hacim_tl = last_volume * last_close
 
+        # 5 ve 10 günlük hacim
+        avg_vol_5 = df_daily["Volume"].iloc[-6:-1].mean()
+        rvol_5 = last_volume / avg_vol_5 if avg_vol_5 > 0 else 0
         avg_vol_10 = df_daily["Volume"].iloc[-11:-1].mean()
         rvol = last_volume / avg_vol_10 if avg_vol_10 > 0 else 0
 
-        ema9 = df_daily.ta.ema(length=9)
-        if ema9 is None:
+        # RSI
+        rsi_daily = df_daily.ta.rsi(length=14)
+        rsi_weekly = df_weekly.ta.rsi(length=14)
+        if rsi_daily is None or rsi_weekly is None:
             return None
-        trend_kirilimi = (last_close > float(ema9.iloc[-1])) and (prev_close <= float(ema9.iloc[-2]))
+        rsi_d = float(rsi_daily.iloc[-1])
+        rsi_w = float(rsi_weekly.iloc[-1])
 
+        # Stochastic
+        stoch = df_daily.ta.stoch(k=14, d=3, smooth_k=3)
+        if stoch is None or stoch.empty:
+            return None
+        k_col = next((c for c in stoch.columns if "STOCHk" in c), None)
+        d_col = next((c for c in stoch.columns if "STOCHd" in c), None)
+        if not k_col or not d_col:
+            return None
+        stoch_k = float(stoch[k_col].iloc[-1])
+        stoch_d = float(stoch[d_col].iloc[-1])
+        stoch_alimda = (stoch_k < 20) or (stoch_k > stoch_d and stoch_k < 35)
+
+        # Bollinger Bands
+        bb = df_daily.ta.bbands(length=20, std=2)
+        if bb is None or bb.empty:
+            return None
+        lower_col = next((c for c in bb.columns if "BBL" in c), None)
+        mid_col = next((c for c in bb.columns if "BBM" in c), None)
+        if not lower_col or not mid_col:
+            return None
+        bb_lower = float(bb[lower_col].iloc[-1])
+        bb_destek = last_close <= (bb_lower * 1.03) and last_close >= (bb_lower * 0.97)
+
+        # ATR
         atr = df_daily.ta.atr(length=14)
         if atr is None:
             return None
@@ -302,30 +312,68 @@ def analyze_ticker(symbol: str):
         stop_loss = max(0.01, last_close - (1.5 * atr_val))
         take_profit = last_close + (3.0 * atr_val)
 
+        # Defter Değeri (PD/DD)
+        pb_ratio = None
+        try:
+            info = ticker.info
+            pb_ratio = info.get("priceToBook") or info.get("priceToBookRatio")
+            if pb_ratio:
+                pb_ratio = float(pb_ratio)
+        except Exception:
+            pass
+
+        # Son 5 günde aşırı zarar kontrolü
+        close_5d_ago = float(df_daily["Close"].iloc[-6]) if len(df_daily) >= 6 else last_close
+        change_5d = ((last_close - close_5d_ago) / close_5d_ago) * 100
+        asiri_zarar_yok = change_5d > -12
+
         avg_vol_20 = df_daily["Volume"].iloc[-20:].mean()
         tahta_durumu = "⚠️ Sığ Tahta" if avg_vol_20 < 400_000 else "🟢 Likit Tahta"
 
-        # === YENİ STRATEJİ ŞARTLARI ===
-        teknik_onay = (
+        kap_ozeti, kap_onemli = get_kap_news_api(symbol)
+
+        # =====================================================
+        # İKİ STRATEJİ
+        # =====================================================
+        # Strateji A: Klasik Dip + Hacim
+        strateji_a = (
             rsi_d < 30 and
             rsi_w < 32 and
             stoch_alimda and
-            hacim_tl >= 20_000_000 and      # 20 milyon TL ve üstü
-            rvol >= 1.0 and                 # Göreceli hacim 1.0 ve üstü
+            hacim_tl >= 20_000_000 and
+            rvol >= 1.0 and
             change_pct > 0
         )
 
-        if not teknik_onay:
+        # Strateji B: Bollinger Alt + Düşük PD/DD + 5g Hacim + Zarar yok
+        strateji_b = (
+            bb_destek and
+            (pb_ratio is not None and pb_ratio < 1.5) and
+            rvol_5 >= 1.2 and
+            asiri_zarar_yok and
+            hacim_tl >= 8_000_000 and
+            change_pct > -1
+        )
+
+        if not (strateji_a or strateji_b):
             return None
 
-        kap_ozeti, kap_onemli = get_kap_news_api(symbol)
-
+        # Yıldız
         yildiz = 3
-        if rvol >= 2.0:
+        if rvol >= 2.0 or rvol_5 >= 2.0:
             yildiz += 1
-        if trend_kirilimi:
+        if bb_destek:
+            yildiz += 1
+        if kap_onemli:
+            yildiz += 1
+        if pb_ratio and pb_ratio < 1.0:
             yildiz += 1
         yildizlar = "⭐" * min(yildiz, 5)
+
+        ema9 = df_daily.ta.ema(length=9)
+        trend_kirilimi = False
+        if ema9 is not None:
+            trend_kirilimi = (last_close > float(ema9.iloc[-1])) and (prev_close <= float(ema9.iloc[-2]))
 
         return {
             "symbol": symbol,
@@ -334,6 +382,7 @@ def analyze_ticker(symbol: str):
             "rsi_d": round(rsi_d, 1),
             "stoch_k": round(stoch_k, 1),
             "rvol": round(rvol, 2),
+            "rvol_5": round(rvol_5, 2),
             "hacim_tl": format_compact_volume(hacim_tl),
             "tahta_durumu": tahta_durumu,
             "sl": round(stop_loss, 2),
@@ -342,6 +391,9 @@ def analyze_ticker(symbol: str):
             "kap_onemli": kap_onemli,
             "trend_kirilimi": trend_kirilimi,
             "yildizlar": yildizlar,
+            "pb_ratio": round(pb_ratio, 2) if pb_ratio else None,
+            "bb_destek": bb_destek,
+            "strateji": "A" if strateji_a else "B"
         }
     except Exception as e:
         logger.debug(f"{symbol} analiz hatası: {e}")
@@ -373,24 +425,26 @@ def scan_bist_stocks(symbol_list, scan_time: str):
 
     baslik_ek = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMASI"
     mesaj = (
-        f"🎯 <b>[DİP + HACİM PATLAMASI AVCISI | {baslik_ek}]</b>\n"
+        f"🎯 <b>[DİP + BB + DÜŞÜK PD/DD AVCISI | {baslik_ek}]</b>\n"
         f"📅 <i>{datetime.now(TZ).strftime('%d.%m.%Y - %H:%M')}</i>\n\n"
     )
 
     for item in eslesenler:
         uyari = "🚨" if item["kap_onemli"] else ""
-        if item["trend_kirilimi"]:
-            durum = f"🚀 <b>Durum:</b> DÜŞEN KIRILIMI ONAYLANDI {item['yildizlar']}"
-        else:
-            durum = f"📊 <b>Durum:</b> Dipte Güç Topluyor {item['yildizlar']}"
+        strateji_adi = "Klasik Dip" if item["strateji"] == "A" else "BB Alt + Düşük PD/DD"
 
         hisse_str = (
             f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']}) {uyari}\n"
-            f"├ {durum}\n"
-            f"├ <b>Göreceli Hacim:</b> {item['rvol']}x | <b>Hacim:</b> {item['hacim_tl']} TL\n"
-            f"├ <b>RSI:</b> {item['rsi_d']} | <b>Stoch:</b> {item['stoch_k']} | {item['tahta_durumu']}\n"
-            f"├ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n"
-            f"└ 📢 <b>KAP:</b> <i>{item['kap_ozeti']}</i>\n\n"
+            f"├ {'🚀 DÜŞEN KIRILIMI' if item['trend_kirilimi'] else '📊 Dipte Güç Topluyor'} {item['yildizlar']}\n"
+            f"├ <b>Strateji:</b> {strateji_adi}\n"
+            f"├ <b>Hacim:</b> {item['hacim_tl']} TL | RVOL10: {item['rvol']}x | RVOL5: {item['rvol_5']}x\n"
+            f"├ <b>RSI:</b> {item['rsi_d']} | Stoch: {item['stoch_k']} | {item['tahta_durumu']}\n"
+        )
+        if item.get("pb_ratio"):
+            hisse_str += f"├ <b>PD/DD:</b> {item['pb_ratio']}\n"
+        hisse_str += (
+            f"├ 🛑 SL: {item['sl']} TL | 🎯 TP: {item['tp']} TL\n"
+            f"└ 📢 KAP: <i>{item['kap_ozeti']}</i>\n\n"
         )
 
         if len(mesaj) + len(hisse_str) > 3900:
@@ -413,9 +467,10 @@ def main():
     current_time_str = now.strftime("%H:%M")
 
     send_telegram_msg(
-        "🤖 <b>BİST BOTU GÜNCELLENDİ</b>\n"
-        "⏰ Gün İçi: <b>09:50, 10:10, 17:45</b> | Gece: <b>23:00</b>\n"
-        "📊 Hacim ≥ 20M | RVOL ≥ 1.0 | Tüm Hisseler\n"
+        "🤖 <b>BİST BOTU - GÜNCEL VERSİYON</b>\n"
+        "⏰ 09:50 | 10:10 | 17:45 | 23:00\n"
+        "📊 Strateji A: RSI Dip + Hacim 20M+\n"
+        "📊 Strateji B: BB Alt + Düşük PD/DD + 5g Hacim\n"
         "🚀 Sistem aktif..."
     )
 
