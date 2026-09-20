@@ -35,7 +35,7 @@ except ModuleNotFoundError as e:
     exit(1)
 
 # ============================================================
-# RENDER SAĞLIK KONTROLÜ
+# RENDER / SAĞLIK KONTROLÜ
 # ============================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -48,7 +48,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        return  # sessiz
+        return
 
 def start_health_check_server():
     port = int(os.environ.get("PORT", 10000))
@@ -64,9 +64,7 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
-# Türkiye saati
 TZ = ZoneInfo("Europe/Istanbul")
-
 TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
 
 KAP_STAR_MAP = {
@@ -84,7 +82,6 @@ BIST_30_SET = {
     "SASA", "SISE", "TCELL", "THYAO", "TOASO", "TUPRS",
 }
 
-# Kısaltılmış ve daha güncel bir yedek liste (tam liste çok uzun ve outdated olabiliyor)
 FULL_BIST_LIST = [
     "A1CAP", "AAVTUR", "ACSEL", "ADEL", "ADESE", "AEFES", "AFYON", "AGESA", "AGHOL",
     "AGROT", "AHGAZ", "AKCNS", "AKENR", "AKFGY", "AKFYE", "AKGRT", "AKMGY", "AKSA",
@@ -179,7 +176,7 @@ def format_compact_volume(v):
         return "0"
 
 def get_all_bist_tickers():
-    """Önce canlı listeyi dene, olmazsa yedek listeyi kullan"""
+    """Tüm BIST hisselerini al (BIST 30 DAHİL)"""
     try:
         url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -191,18 +188,18 @@ def get_all_bist_tickers():
                 for item in data
                 if item.get("code") and len(item.get("code", "")) <= 5
             }
-            filtered = sorted(list(fetched - BIST_30_SET))
+            filtered = sorted(list(fetched))
             if len(filtered) >= 300:
-                logger.info(f"Canlı BIST listesi alındı: {len(filtered)} hisse")
+                logger.info(f"Canlı BIST listesi alındı: {len(filtered)} hisse (BIST 30 dahil)")
                 return filtered
     except Exception as e:
         logger.warning(f"Canlı liste alınamadı: {e}")
 
-    logger.info("Yedek liste kullanılıyor")
-    return sorted(list(set(FULL_BIST_LIST) - BIST_30_SET))
+    logger.info("Yedek liste kullanılıyor (BIST 30 dahil)")
+    return sorted(list(set(FULL_BIST_LIST) | BIST_30_SET))
 
 # ============================================================
-# KAP RSS (Anlık bildirim)
+# KAP RSS
 # ============================================================
 def check_kap_news():
     global PROCESSED_KAP_LINKS
@@ -211,11 +208,9 @@ def check_kap_news():
         for entry in feed.entries[:25]:
             if entry.link in PROCESSED_KAP_LINKS:
                 continue
-
             title = entry.title or ""
             summary = getattr(entry, "summary", "") or ""
             content_lower = (title + " " + summary).lower()
-
             for key, (stars, category) in KAP_STAR_MAP.items():
                 if key in content_lower:
                     PROCESSED_KAP_LINKS.add(entry.link)
@@ -230,9 +225,6 @@ def check_kap_news():
     except Exception as e:
         logger.debug(f"KAP RSS hatası: {e}")
 
-# ============================================================
-# KAP API (Tarama raporu için)
-# ============================================================
 def get_kap_news_api(symbol: str):
     onemli_kategoriler = [
         "yeni iş ilişkisi", "ihale", "finansal rapor", "bilanço",
@@ -240,10 +232,7 @@ def get_kap_news_api(symbol: str):
     ]
     try:
         url = f"https://www.kap.org.tr/tr/api/disclosures?code={symbol}"
-        response = requests.get(
-            url, timeout=6,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
+        response = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
         if response.status_code == 200:
             data = response.json()
             if data and isinstance(data, list) and len(data) > 0:
@@ -258,7 +247,7 @@ def get_kap_news_api(symbol: str):
     return "Aktif bildirim yok", False
 
 # ============================================================
-# ANA ANALİZ FONKSİYONU
+# ANA ANALİZ
 # ============================================================
 def analyze_ticker(symbol: str):
     try:
@@ -271,7 +260,6 @@ def analyze_ticker(symbol: str):
         if df_weekly is None or len(df_weekly) < 15:
             return None
 
-        # RSI
         rsi_daily = df_daily.ta.rsi(length=14)
         rsi_weekly = df_weekly.ta.rsi(length=14)
         if rsi_daily is None or rsi_weekly is None:
@@ -279,12 +267,10 @@ def analyze_ticker(symbol: str):
         rsi_d = float(rsi_daily.iloc[-1])
         rsi_w = float(rsi_weekly.iloc[-1])
 
-        # Stochastic
         stoch = df_daily.ta.stoch(k=14, d=3, smooth_k=3)
         if stoch is None or stoch.empty:
             return None
 
-        # Sütun isimleri bazen değişebiliyor
         k_col = next((c for c in stoch.columns if "STOCHk" in c), None)
         d_col = next((c for c in stoch.columns if "STOCHd" in c), None)
         if not k_col or not d_col:
@@ -304,13 +290,11 @@ def analyze_ticker(symbol: str):
         avg_vol_10 = df_daily["Volume"].iloc[-11:-1].mean()
         rvol = last_volume / avg_vol_10 if avg_vol_10 > 0 else 0
 
-        # EMA9
         ema9 = df_daily.ta.ema(length=9)
         if ema9 is None:
             return None
         trend_kirilimi = (last_close > float(ema9.iloc[-1])) and (prev_close <= float(ema9.iloc[-2]))
 
-        # ATR ile SL / TP
         atr = df_daily.ta.atr(length=14)
         if atr is None:
             return None
@@ -318,17 +302,16 @@ def analyze_ticker(symbol: str):
         stop_loss = max(0.01, last_close - (1.5 * atr_val))
         take_profit = last_close + (3.0 * atr_val)
 
-        # Tahta derinliği
         avg_vol_20 = df_daily["Volume"].iloc[-20:].mean()
-        tahta_durumu = "⚠️ Sığ Tahta" if avg_vol_20 < 500_000 else "🟢 Likit Tahta"
+        tahta_durumu = "⚠️ Sığ Tahta" if avg_vol_20 < 400_000 else "🟢 Likit Tahta"
 
-        # === STRATEJİ ŞARTLARI ===
+        # === YENİ STRATEJİ ŞARTLARI ===
         teknik_onay = (
             rsi_d < 30 and
-            rsi_w < 32 and          # haftalık biraz esnetildi
+            rsi_w < 32 and
             stoch_alimda and
-            hacim_tl >= 8_000_000 and   # 8M TL (Render için biraz esnek)
-            rvol >= 1.5 and
+            hacim_tl >= 20_000_000 and      # 20 milyon TL ve üstü
+            rvol >= 1.0 and                 # Göreceli hacim 1.0 ve üstü
             change_pct > 0
         )
 
@@ -338,7 +321,7 @@ def analyze_ticker(symbol: str):
         kap_ozeti, kap_onemli = get_kap_news_api(symbol)
 
         yildiz = 3
-        if rvol >= 2.5:
+        if rvol >= 2.0:
             yildiz += 1
         if trend_kirilimi:
             yildiz += 1
@@ -386,7 +369,6 @@ def scan_bist_stocks(symbol_list, scan_time: str):
         )
         return
 
-    # Sıralama: önce KAP önemli olanlar, sonra RVOL
     eslesenler.sort(key=lambda x: (x["kap_onemli"], x["rvol"]), reverse=True)
 
     baslik_ek = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMASI"
@@ -431,18 +413,16 @@ def main():
     current_time_str = now.strftime("%H:%M")
 
     send_telegram_msg(
-        "🤖 <b>BİST BOTU (DÜZELTİLMİŞ VERSİYON) BAŞLATILDI</b>\n"
+        "🤖 <b>BİST BOTU GÜNCELLENDİ</b>\n"
         "⏰ Gün İçi: <b>09:50, 10:10, 17:45</b> | Gece: <b>23:00</b>\n"
-        "🌍 Saat dilimi: <b>Europe/Istanbul</b>\n"
+        "📊 Hacim ≥ 20M | RVOL ≥ 1.0 | Tüm Hisseler\n"
         "🚀 Sistem aktif..."
     )
 
-    # Açılış testi (sadece 8 hisse – timeout riskini azaltır)
     try:
         check_kap_news()
         hedef = get_all_bist_tickers()
-        test_list = hedef[:8]
-        scan_bist_stocks(test_list, f"İLK AÇILIŞ TESTİ ({current_time_str})")
+        scan_bist_stocks(hedef, f"İLK AÇILIŞ TESTİ ({current_time_str})")
         send_telegram_msg("✅ <b>Açılış testi tamamlandı!</b> Alarm saatleri bekleniyor.")
     except Exception as e:
         send_telegram_msg(f"❌ <b>Açılış testinde hata:</b> {e}")
@@ -454,7 +434,6 @@ def main():
             loop_time = now.strftime("%H:%M")
             loop_date = now.strftime("%Y-%m-%d")
 
-            # Arka planda KAP haberleri
             check_kap_news()
 
             scan_key = f"{loop_date}_{loop_time}"
@@ -464,10 +443,9 @@ def main():
                 scan_bist_stocks(hedef_hisseler, loop_time)
                 SCANNED_TIMES_TODAY.add(scan_key)
 
-                # Gece bülteni sonrası temizle
                 if loop_time == "23:00":
                     PROCESSED_KAP_LINKS.clear()
-                    SCANNED_TIMES_TODAY.clear()  # yeni güne hazırlık
+                    SCANNED_TIMES_TODAY.clear()
                     logger.info("Günlük listeler sıfırlandı")
 
             time.sleep(25)
