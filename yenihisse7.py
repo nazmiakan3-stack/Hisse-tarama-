@@ -10,11 +10,7 @@ from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("BISTBot")
 
 try:
@@ -68,9 +64,63 @@ BIST_30_SET = {
     "SASA", "SISE", "TCELL", "THYAO", "TOASO", "TUPRS",
 }
 
-FULL_BIST_LIST = [  # (liste aynı, kısaltıyorum - önceki uzun listeyi kullan)
+FULL_BIST_LIST = [
     "A1CAP", "AAVTUR", "ACSEL", "ADEL", "ADESE", "AEFES", "AFYON", "AGESA", "AGHOL",
-    # ... (önceki FULL_BIST_LIST'in tamamını buraya koy)
+    "AGROT", "AHGAZ", "AKCNS", "AKENR", "AKFGY", "AKFYE", "AKGRT", "AKMGY", "AKSA",
+    "AKSEN", "AKSGY", "ALBRK", "ALCAR", "ALCTL", "ALFAS", "ALGYO", "ALKA", "ALKIM",
+    "ALMAD", "ALTNY", "ALVES", "ANELE", "ANGEN", "ANHYT", "ANSGR", "ARASE", "ARCLK",
+    "ARDYZ", "ARENA", "ARSAN", "ARTMS", "ARZUM", "ASGYO", "ASUZU", "ATAGY", "ATAKP",
+    "ATATP", "ATEKS", "ATLAS", "ATSYH", "AVGYO", "AVHOL", "AVOD", "AVPGY", "AYCES",
+    "AYDEM", "AYEN", "AYES", "AYGAZ", "AZTEK", "BAGFS", "BAKAB", "BALAT", "BANVT",
+    "BARMA", "BASGZ", "BAYRK", "BEAYO", "BEYAZ", "BFREN", "BIENY", "BIGCH", "BINHO",
+    "BIOEN", "BIZIM", "BJKAS", "BLCYT", "BMSCH", "BMSTL", "BNTAS", "BOBET", "BORLS",
+    "BORSK", "BOSSA", "BRISA", "BRKO", "BRKSN", "BRKVY", "BRLSM", "BRMEN", "BRYAT",
+    "BSOKE", "BTCIM", "BUCIM", "BURCE", "BURVA", "BVSAN", "BYDNR", "CANTE", "CASA",
+    "CATES", "CCOLA", "CELHA", "CEMAS", "CEMTS", "CEOEM", "CIMSA", "CLEBI", "CMBTN",
+    "CMENT", "CONSE", "COSMO", "CRDFA", "CRFSA", "CUSAN", "CVKMD", "CWENE", "DAGHL",
+    "DAGI", "DAPGM", "DARDL", "DATA", "DEFVA", "DERHL", "DERIM", "DESA", "DESPC",
+    "DEVA", "DGNMO", "DIRIT", "DITAS", "DMRGD", "DMSAS", "DOBUR", "DOCO", "DOFER",
+    "DOGUB", "DOHOL", "DOKTA", "DURDO", "DYOBY", "DZGYO", "EBEBK", "ECILC", "ECZYT",
+    "EDATA", "EDIP", "EGEEN", "EGEPO", "EGERT", "EGPRO", "EGSER", "EKIZ", "EKOS",
+    "EKSUN", "ELITE", "EMKEL", "ENERY", "ENJSA", "ENTRA", "EPLAS", "ERBOS", "ERCAN",
+    "ERSU", "ESCAR", "ESCOM", "ESEN", "ETILR", "ETYAT", "EUHOL", "EUREN", "EUYO",
+    "EYGYO", "FADE", "FENER", "FLAP", "FMIZP", "FONET", "FORMT", "FORTE", "FRIGO",
+    "FSYGM", "FZLGY", "GARFA", "GENTS", "GEREL", "GESAN", "GIPTA", "GLBMD", "GLCVY",
+    "GLRYH", "GLYHO", "GMTAS", "GOKNR", "GOLTS", "GOODY", "GOZDE", "GRNYO", "GRSEL",
+    "GRTRK", "GSDDE", "GSDHO", "GSRAY", "GWIND", "GZNMI", "HALKB", "HATEK", "HATSN",
+    "HDFGS", "HEDEF", "HKTM", "HLGYO", "HRZNO", "HSCSM", "HUBVC", "HUNER", "HURGZ",
+    "ICBCT", "ICUGS", "IDGYO", "IEYHO", "IHAAS", "IHEVA", "IHGZT", "IHLAS", "IHLGM",
+    "IHYAY", "IMASM", "INDES", "INFO", "INGRM", "INTEM", "INVEO", "INVES", "IPEKE",
+    "ISATR", "ISBIR", "ISBTR", "ISDMR", "ISFIN", "ISGSY", "ISGYO", "ISKPL", "ISKUR",
+    "ISMEN", "ISSEN", "ISYAT", "ITTFH", "IZENR", "IZFAS", "IZINV", "IZMDC", "JANTS",
+    "KALES", "KALEK", "KARSN", "KARTN", "KARYE", "KATMR", "KCAER", "KENT", "KERVN",
+    "KERVT", "KFEIN", "KGYO", "KIMMR", "KLGYO", "KLKIM", "KLMSN", "KLNMA", "KLRHO",
+    "KLSYN", "KMPUR", "KNFRT", "KOCMT", "KONKA", "KONYA", "KOPOL", "KORDS", "KOZAA",
+    "KRDMA", "KRDMB", "KRGYO", "KRONT", "KRPLS", "KRSTL", "KRTEK", "KRVGD", "KSTUR",
+    "KTLEV", "KTSKR", "KUTPO", "KUVVA", "KUYAS", "KZBGY", "KZGYO", "LIDER", "LIDFA",
+    "LINK", "LKMNH", "LOGO", "LRSHO", "LUKSK", "MAALT", "MACKO", "MACRO", "MAGEN",
+    "MAKIM", "MAKTK", "MANAS", "MARKA", "MARTI", "MAVI", "MAXOT", "MEDTR", "MEGAP",
+    "MEKAG", "MEPET", "MERCN", "MERIT", "MERKO", "METRO", "METUR", "MGROS", "MHRGY",
+    "MIATK", "MIPAZ", "MMCAS", "MNDRS", "MNDTR", "MOBTL", "MOGAN", "MPARK", "MRGYO",
+    "MRSHL", "MSGYO", "MTRKS", "MTRYO", "MUHAL", "MUREN", "NASHQ", "NATEN", "NETAS",
+    "NIBAS", "NTGAZ", "NTHOL", "NUGYO", "NUHCM", "OBASE", "OBAMS", "ODINE", "OFSYM",
+    "ONCSM", "ORCAY", "ORGE", "ORMA", "OSMEN", "OSTIM", "OTKAR", "OTTO", "OYAYO",
+    "OYLUM", "OYYAT", "OZGYO", "OZKGY", "OZRDN", "OZSUB", "PAGYO", "PAMEL", "PAPIL",
+    "PARSN", "PASEU", "PATEK", "PCILT", "PEGYO", "PEKGY", "PENGD", "PENTA", "PETUN",
+    "PINSU", "PKART", "PKENT", "PLTUR", "PNLSN", "PNSUT", "POLHO", "POLTK", "PRDGS",
+    "PRKAB", "PRKME", "PRZMA", "PSDTC", "PSGYO", "QNBFL", "QUAGR", "RALYH", "RAYSG",
+    "REEDR", "RNPOL", "RODRG", "ROYAL", "RTALB", "RUBNS", "RYGYO", "RYSAS", "SAMAT",
+    "SANEL", "SANFM", "SANKO", "SARKY", "SAYAS", "SDTTR", "SEGYO", "SEKFK", "SEKUR",
+    "SELEC", "SELGD", "SELVA", "SEYKM", "SILVR", "SKBNK", "SKTAS", "SMART", "SMRTG",
+    "SNGYO", "SNICA", "SNKRN", "SNPAM", "SNTCD", "SOKE", "SOKM", "SONME", "SRVGY",
+    "SUMAS", "SUNTK", "SURGY", "SUWEN", "TABGD", "TARKM", "TATEN", "TATGD", "TAVHL",
+    "TBORG", "TDGYO", "TEKTU", "TERA", "TETMT", "TEZOL", "TGSAS", "TKFEN", "TKNSA",
+    "TLMAN", "TMPOL", "TMSN", "TRCAS", "TRGYO", "TRILC", "TSGYO", "TSKB", "TSPOR",
+    "TTKOM", "TTRAK", "TUCLK", "TUKAS", "TUREX", "TURGG", "TURSG", "UFUK", "ULAS",
+    "ULKER", "ULUFA", "ULUSE", "ULUUN", "UMPAS", "UNLU", "USAK", "UZERB", "VAKBN",
+    "VAKFN", "VAKKO", "VANGD", "VBTYZ", "VERTU", "VERUS", "VESBE", "VESTL", "VKFYO",
+    "VKGYO", "VKING", "VRGYO", "YAPRK", "YATAS", "YAYLA", "YBTAS", "YEOTK", "YESIL",
+    "YGGYO", "YGYO", "YKBNK", "YKSLN", "YONGA", "YUNSA", "YYAPI", "ZEDUR", "ZOREN",
     "ZRGYO"
 ]
 
@@ -82,12 +132,7 @@ def send_telegram_msg(message: str):
         print(f"\n[TELEGRAM MESAJI]:\n{message}\n")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
     try:
         requests.post(url, json=payload, timeout=12)
     except Exception as e:
@@ -129,12 +174,7 @@ def check_kap_news():
             for key, (stars, category) in KAP_STAR_MAP.items():
                 if key in content_lower:
                     PROCESSED_KAP_LINKS.add(entry.link)
-                    send_telegram_msg(
-                        f"🔥 <b>[YÜKSEK HABER DEĞERİ]</b>\n"
-                        f"<b>Etki:</b> {stars}\n"
-                        f"<b>Başlık:</b> {title}\n"
-                        f"<b>Link:</b> <a href='{entry.link}'>KAP Detayı</a>"
-                    )
+                    send_telegram_msg(f"🔥 <b>[YÜKSEK HABER DEĞERİ]</b>\n<b>Etki:</b> {stars}\n<b>Başlık:</b> {title}\n<b>Link:</b> <a href='{entry.link}'>KAP Detayı</a>")
                     time.sleep(0.4)
                     break
     except Exception as e:
@@ -160,39 +200,40 @@ def get_kap_news_api(symbol: str):
 def analyze_ticker(symbol: str):
     try:
         ticker = yf.Ticker(f"{symbol}.IS")
-        df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
-        if df is None or len(df) < 35: return None
+        df_daily = ticker.history(period="6mo", interval="1d", auto_adjust=True)
+        df_weekly = ticker.history(period="1y", interval="1wk", auto_adjust=True)
 
-        last_close = float(df["Close"].iloc[-1])
-        prev_close = float(df["Close"].iloc[-2])
+        if df_daily is None or len(df_daily) < 35: return None
+        if df_weekly is None or len(df_weekly) < 15: return None
+
+        last_close = float(df_daily["Close"].iloc[-1])
+        prev_close = float(df_daily["Close"].iloc[-2])
         change_pct = ((last_close - prev_close) / prev_close) * 100
 
-        last_volume = float(df["Volume"].iloc[-1])
+        last_volume = float(df_daily["Volume"].iloc[-1])
         hacim_tl = last_volume * last_close
 
-        avg_vol_5 = df["Volume"].iloc[-6:-1].mean()
+        avg_vol_5 = df_daily["Volume"].iloc[-6:-1].mean()
         rvol_5 = last_volume / avg_vol_5 if avg_vol_5 > 0 else 0
-        avg_vol_10 = df["Volume"].iloc[-11:-1].mean()
+        avg_vol_10 = df_daily["Volume"].iloc[-11:-1].mean()
         rvol = last_volume / avg_vol_10 if avg_vol_10 > 0 else 0
 
-        # RSI
-        rsi = df.ta.rsi(length=14)
-        rsi_d = float(rsi.iloc[-1]) if rsi is not None else 50
+        rsi_daily = df_daily.ta.rsi(length=14)
+        rsi_weekly = df_weekly.ta.rsi(length=14)
+        if rsi_daily is None or rsi_weekly is None: return None
+        rsi_d = float(rsi_daily.iloc[-1])
+        rsi_w = float(rsi_weekly.iloc[-1])
 
-        # Stochastic
-        stoch = df.ta.stoch(k=14, d=3, smooth_k=3)
-        stoch_k = 50
-        stoch_alimda = False
-        if stoch is not None and not stoch.empty:
-            k_col = next((c for c in stoch.columns if "STOCHk" in c), None)
-            d_col = next((c for c in stoch.columns if "STOCHd" in c), None)
-            if k_col and d_col:
-                stoch_k = float(stoch[k_col].iloc[-1])
-                stoch_d = float(stoch[d_col].iloc[-1])
-                stoch_alimda = (stoch_k < 20) or (stoch_k > stoch_d and stoch_k < 35)
+        stoch = df_daily.ta.stoch(k=14, d=3, smooth_k=3)
+        if stoch is None or stoch.empty: return None
+        k_col = next((c for c in stoch.columns if "STOCHk" in c), None)
+        d_col = next((c for c in stoch.columns if "STOCHd" in c), None)
+        if not k_col or not d_col: return None
+        stoch_k = float(stoch[k_col].iloc[-1])
+        stoch_d = float(stoch[d_col].iloc[-1])
+        stoch_alimda = (stoch_k < 20) or (stoch_k > stoch_d and stoch_k < 35)
 
-        # Bollinger
-        bb = df.ta.bbands(length=20, std=2)
+        bb = df_daily.ta.bbands(length=20, std=2)
         bb_destek = False
         if bb is not None and not bb.empty:
             lower_col = next((c for c in bb.columns if "BBL" in c), None)
@@ -200,7 +241,12 @@ def analyze_ticker(symbol: str):
                 bb_lower = float(bb[lower_col].iloc[-1])
                 bb_destek = last_close <= (bb_lower * 1.03) and last_close >= (bb_lower * 0.97)
 
-        # PD/DD
+        atr = df_daily.ta.atr(length=14)
+        if atr is None: return None
+        atr_val = float(atr.iloc[-1])
+        stop_loss = max(0.01, last_close - (1.5 * atr_val))
+        take_profit = last_close + (3.0 * atr_val)
+
         pb_ratio = None
         try:
             info = ticker.info
@@ -208,21 +254,21 @@ def analyze_ticker(symbol: str):
             if pb_ratio: pb_ratio = float(pb_ratio)
         except: pass
 
-        # 5 günlük değişim
-        close_5d = float(df["Close"].iloc[-6]) if len(df) >= 6 else last_close
-        change_5d = ((last_close - close_5d) / close_5d) * 100
+        close_5d_ago = float(df_daily["Close"].iloc[-6]) if len(df_daily) >= 6 else last_close
+        change_5d = ((last_close - close_5d_ago) / close_5d_ago) * 100
         asiri_zarar_yok = change_5d > -12
+
+        avg_vol_20 = df_daily["Volume"].iloc[-20:].mean()
+        tahta_durumu = "⚠️ Sığ Tahta" if avg_vol_20 < 400_000 else "🟢 Likit Tahta"
 
         kap_ozeti, kap_onemli = get_kap_news_api(symbol)
 
-        # === STRATEJİLER ===
-        strateji_a = (rsi_d < 30 and stoch_alimda and hacim_tl >= 20_000_000 and rvol >= 1.0 and change_pct > 0)
-        strateji_b = (bb_destek and pb_ratio is not None and pb_ratio < 1.5 and rvol_5 >= 1.2 and asiri_zarar_yok and hacim_tl >= 8_000_000)
+        # Ana Stratejiler (eski hali korundu)
+        strateji_a = (rsi_d < 30 and rsi_w < 32 and stoch_alimda and hacim_tl >= 20_000_000 and rvol >= 1.0 and change_pct > 0)
+        strateji_b = (bb_destek and (pb_ratio is not None and pb_ratio < 1.5) and rvol_5 >= 1.2 and asiri_zarar_yok and hacim_tl >= 8_000_000 and change_pct > -1)
 
-        # Yeni: %5+ yükselenler
+        # Ek listeler için
         yuzde_5_ustu = change_pct >= 5.0 and hacim_tl >= 5_000_000
-
-        # Yeni: Saf hacim patlaması listesi
         hacim_patlamasi = hacim_tl >= 20_000_000 and rvol >= 1.0
 
         if not (strateji_a or strateji_b or yuzde_5_ustu or hacim_patlamasi):
@@ -233,8 +279,12 @@ def analyze_ticker(symbol: str):
         if bb_destek: yildiz += 1
         if kap_onemli: yildiz += 1
         if pb_ratio and pb_ratio < 1.0: yildiz += 1
-        if change_pct >= 5: yildiz += 1
         yildizlar = "⭐" * min(yildiz, 5)
+
+        ema9 = df_daily.ta.ema(length=9)
+        trend_kirilimi = False
+        if ema9 is not None:
+            trend_kirilimi = (last_close > float(ema9.iloc[-1])) and (prev_close <= float(ema9.iloc[-2]))
 
         return {
             "symbol": symbol,
@@ -246,8 +296,12 @@ def analyze_ticker(symbol: str):
             "rvol_5": round(rvol_5, 2),
             "hacim_tl": format_compact_volume(hacim_tl),
             "hacim_tl_raw": hacim_tl,
+            "tahta_durumu": tahta_durumu,
+            "sl": round(stop_loss, 2),
+            "tp": round(take_profit, 2),
             "kap_ozeti": kap_ozeti,
             "kap_onemli": kap_onemli,
+            "trend_kirilimi": trend_kirilimi,
             "yildizlar": yildizlar,
             "pb_ratio": round(pb_ratio, 2) if pb_ratio else None,
             "strateji_a": strateji_a,
@@ -263,9 +317,9 @@ def scan_bist_stocks(symbol_list, scan_time: str):
     now_str = datetime.now(TZ).strftime("%H:%M:%S")
     logger.info(f"[{now_str}] Tarama başladı → {scan_time} | {len(symbol_list)} hisse")
 
-    strateji_list = []
-    yuzde5_list = []
-    hacim_list = []
+    ana_liste = []
+    yuzde5_liste = []
+    hacim_liste = []
 
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {executor.submit(analyze_ticker, sym): sym for sym in symbol_list}
@@ -273,79 +327,91 @@ def scan_bist_stocks(symbol_list, scan_time: str):
             res = future.result()
             if res:
                 if res["strateji_a"] or res["strateji_b"]:
-                    strateji_list.append(res)
+                    ana_liste.append(res)
                 if res["yuzde_5_ustu"]:
-                    yuzde5_list.append(res)
+                    yuzde5_liste.append(res)
                 if res["hacim_patlamasi"]:
-                    hacim_list.append(res)
+                    hacim_liste.append(res)
 
-    # Sıralamalar
-    strateji_list.sort(key=lambda x: (x["kap_onemli"], x["rvol"]), reverse=True)
-    yuzde5_list.sort(key=lambda x: x["change_pct"], reverse=True)
-    hacim_list.sort(key=lambda x: x["hacim_tl_raw"], reverse=True)
+    ana_liste.sort(key=lambda x: (x["kap_onemli"], x["rvol"]), reverse=True)
+    yuzde5_liste.sort(key=lambda x: x["change_pct"], reverse=True)
+    hacim_liste.sort(key=lambda x: x["hacim_tl_raw"], reverse=True)
 
     baslik_ek = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMASI"
     tarih = datetime.now(TZ).strftime('%d.%m.%Y - %H:%M')
 
-    # 1. Ana Strateji Listesi
-    if strateji_list:
-        mesaj = f"🎯 <b>[ANA STRATEJİ | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in strateji_list[:15]:
-            tip = "Klasik Dip" if item["strateji_a"] else "BB + Düşük PD/DD"
-            mesaj += (
-                f"🔹 <b>#{item['symbol']}</b> | {item['fiyat']} TL (%+{item['change_pct']}) {'🚨' if item['kap_onemli'] else ''}\n"
-                f"├ {tip} {item['yildizlar']}\n"
-                f"├ Hacim: {item['hacim_tl']} | RVOL: {item['rvol']}x\n"
-                f"├ RSI: {item['rsi_d']} | Stoch: {item['stoch_k']}\n"
-                f"└ KAP: <i>{item['kap_ozeti']}</i>\n\n"
+    # ========== 1. ANA LİSTE (Eski detaylı format) ==========
+    if ana_liste:
+        mesaj = f"🎯 <b>[DİP + BB + DÜŞÜK PD/DD AVCISI | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
+        for item in ana_liste:
+            uyari = "🚨" if item["kap_onemli"] else ""
+            durum = f"🚀 <b>Durum:</b> DÜŞEN KIRILIMI ONAYLANDI {item['yildizlar']}" if item["trend_kirilimi"] else f"📊 <b>Durum:</b> Dipte Güç Topluyor {item['yildizlar']}"
+            strateji_adi = "Klasik Dip" if item["strateji_a"] else "BB Alt + Düşük PD/DD"
+
+            hisse_str = (
+                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']}) {uyari}\n"
+                f"├ {durum}\n"
+                f"├ <b>Strateji:</b> {strateji_adi}\n"
+                f"├ <b>Hacim:</b> {item['hacim_tl']} TL | RVOL10: {item['rvol']}x | RVOL5: {item['rvol_5']}x\n"
+                f"├ <b>RSI:</b> {item['rsi_d']} | Stoch: {item['stoch_k']} | {item['tahta_durumu']}\n"
             )
-            if len(mesaj) > 3500:
+            if item.get("pb_ratio"):
+                hisse_str += f"├ <b>PD/DD:</b> {item['pb_ratio']}\n"
+            hisse_str += (
+                f"├ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n"
+                f"└ 📢 <b>KAP:</b> <i>{item['kap_ozeti']}</i>\n\n"
+            )
+
+            if len(mesaj) + len(hisse_str) > 3800:
                 send_telegram_msg(mesaj)
                 mesaj = ""
+                time.sleep(1)
+            mesaj += hisse_str
+
         if mesaj.strip():
             send_telegram_msg(mesaj)
     else:
-        send_telegram_msg(f"ℹ️ <b>{scan_time}</b> - Ana stratejiye uyan hisse yok.")
+        send_telegram_msg(f"ℹ️ <b>{scan_time}</b> - Ana stratejiye uyan hisse bulunamadı.")
 
-    # 2. %5 ve üzeri yükselenler
-    if yuzde5_list:
+    # ========== 2. %5 VE ÜZERİ YÜKSELENLER ==========
+    if yuzde5_liste:
         mesaj = f"🚀 <b>[%5 VE ÜZERİ YÜKSELENLER | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in yuzde5_list[:12]:
+        for item in yuzde5_liste[:15]:
             mesaj += (
-                f"🔹 <b>#{item['symbol']}</b> | {item['fiyat']} TL <b>(%+{item['change_pct']})</b>\n"
+                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> <b>(%+{item['change_pct']})</b>\n"
                 f"├ Hacim: {item['hacim_tl']} | RVOL: {item['rvol']}x\n"
                 f"└ KAP: <i>{item['kap_ozeti']}</i>\n\n"
             )
-            if len(mesaj) > 3500:
+            if len(mesaj) > 3800:
                 send_telegram_msg(mesaj)
                 mesaj = ""
         if mesaj.strip():
             send_telegram_msg(mesaj)
 
-    # 3. Hacim Patlaması Listesi (20M+ ve RVOL≥1)
-    if hacim_list:
+    # ========== 3. HACİM PATLAMASI LİSTESİ ==========
+    if hacim_liste:
         mesaj = f"💥 <b>[HACİM PATLAMASI ≥20M + RVOL≥1 | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in hacim_list[:15]:
+        for item in hacim_liste[:15]:
             mesaj += (
                 f"🔹 <b>#{item['symbol']}</b> | {item['fiyat']} TL (%+{item['change_pct']})\n"
                 f"├ Hacim: <b>{item['hacim_tl']}</b> | RVOL: <b>{item['rvol']}x</b>\n"
                 f"└ KAP: <i>{item['kap_ozeti']}</i>\n\n"
             )
-            if len(mesaj) > 3500:
+            if len(mesaj) > 3800:
                 send_telegram_msg(mesaj)
                 mesaj = ""
         if mesaj.strip():
             send_telegram_msg(mesaj)
 
-    logger.info(f"Tarama bitti → Strateji:{len(strateji_list)} | %5+:{len(yuzde5_list)} | Hacim:{len(hacim_list)}")
+    logger.info(f"Tarama bitti → Ana:{len(ana_liste)} | %5+:{len(yuzde5_liste)} | Hacim:{len(hacim_liste)}")
 
 def main():
     now = datetime.now(TZ)
     current_time_str = now.strftime("%H:%M")
 
     send_telegram_msg(
-        "🤖 <b>BİST BOTU - SON VERSİYON</b>\n"
-        "• Ana Strateji (RSI + BB + PD/DD)\n"
+        "🤖 <b>BİST BOTU - DÜZELTİLMİŞ VERSİYON</b>\n"
+        "• Ana Liste (detaylı eski format)\n"
         "• %5 ve üzeri yükselenler\n"
         "• Hacim ≥20M + RVOL ≥1 listesi\n"
         "🚀 Sistem aktif..."
