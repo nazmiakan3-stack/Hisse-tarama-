@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import json
 import time
 import threading
 import logging
@@ -48,6 +49,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
 TZ = ZoneInfo("Europe/Istanbul")
 TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
+
+TRACKING_FILE = "gunluk_takip.json"
+PROCESSED_NEWS_FILE = "islenen_haberler.json"
 
 KAP_STAR_MAP = {
     "bedelsiz": ("⭐⭐⭐⭐⭐", "Yüksek Oranlı Bedelsiz / Sermaye Artırımı"),
@@ -124,15 +128,25 @@ FULL_BIST_LIST = [
     "ZRGYO"
 ]
 
-PROCESSED_KAP_LINKS = set()
 SCANNED_TIMES_TODAY = set()
 
-def send_telegram_msg(message: str):
+def send_telegram_msg(message: str, sound_alert: bool = False):
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         print(f"\n[TELEGRAM MESAJI]:\n{message}\n")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID, 
+        "text": message, 
+        "parse_mode": "HTML", 
+        "disable_web_page_preview": True
+    }
+    # Eğer sesli uyarı istenmişse Telegram'ın sessiz modunu kapatıp bildirim sesi ürettiriyoruz
+    if sound_alert:
+        payload["disable_notification"] = False
+    else:
+        payload["disable_notification"] = True
+
     try:
         requests.post(url, json=payload, timeout=12)
     except Exception as e:
@@ -156,46 +170,59 @@ def get_all_bist_tickers():
             fetched = {item.get("code") for item in data if item.get("code") and len(item.get("code", "")) <= 5}
             filtered = sorted(list(fetched))
             if len(filtered) >= 300:
-                logger.info(f"Canlı BIST listesi alındı: {len(filtered)} hisse")
                 return filtered
     except Exception as e:
         logger.warning(f"Canlı liste alınamadı: {e}")
     return sorted(list(set(FULL_BIST_LIST) | BIST_30_SET))
 
-def check_kap_news():
-    global PROCESSED_KAP_LINKS
-    try:
-        feed = feedparser.parse("https://www.kap.org.tr/tr/rss")
-        for entry in feed.entries[:25]:
-            if entry.link in PROCESSED_KAP_LINKS: continue
-            title = entry.title or ""
-            summary = getattr(entry, "summary", "") or ""
-            content_lower = (title + " " + summary).lower()
-            for key, (stars, category) in KAP_STAR_MAP.items():
-                if key in content_lower:
-                    PROCESSED_KAP_LINKS.add(entry.link)
-                    send_telegram_msg(f"🔥 <b>[YÜKSEK HABER DEĞERİ]</b>\n<b>Etki:</b> {stars}\n<b>Başlık:</b> {title}\n<b>Link:</b> <a href='{entry.link}'>KAP Detayı</a>")
-                    time.sleep(0.4)
-                    break
-    except Exception as e:
-        logger.debug(f"KAP RSS hatası: {e}")
+# 10 Dakikada bir çalışacak kritik haber ve kripto/bist tarayıcısı
+def check_important_market_news_background():
+    processed_links = set()
+    if os.path.exists(PROCESSED_NEWS_FILE):
+        try:
+            with open(PROCESSED_NEWS_FILE, "r", encoding="utf-8") as f:
+                processed_links = set(json.load(f))
+        except: pass
 
-def get_kap_news_api(symbol: str):
-    onemli = ["yeni iş ilişkisi", "ihale", "finansal rapor", "bilanço", "kar payı", "sermaye artırımı", "pay alım", "birleşme", "bedelsiz"]
-    try:
-        url = f"https://www.kap.org.tr/tr/api/disclosures?code={symbol}"
-        response = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
-        if response.status_code == 200:
-            data = response.json()
-            if data and isinstance(data, list) and len(data) > 0:
-                son = data[0]
-                baslik = son.get("title", "Özel Durum Açıklaması")
-                ozet = son.get("summary") or baslik
-                full_text = f"{baslik} {ozet}".lower()
-                is_important = any(k in full_text for k in onemli)
-                return f"{baslik}: {ozet[:55]}...", is_important
-    except: pass
-    return "Aktif bildirim yok", False
+    while True:
+        try:
+            # KAP RSS ve Kripto/Hisse etkileyebilecek ana kaynaklar
+            feed = feedparser.parse("https://www.kap.org.tr/tr/rss")
+            for entry in feed.entries[:10]:
+                link = getattr(entry, "link", "")
+                if not link or link in processed_links: 
+                    continue
+                
+                title = entry.title or ""
+                summary = getattr(entry, "summary", "") or ""
+                text_lower = (title + " " + summary).lower()
+
+                # Hisse ve Kripto piyasasını etkileyecek anahtar kelimeler
+                kritik_kelimeler = [
+                    "faiz", "enflasyon", "tcmb", "fed", "kripto", "bitcoin", "btc", 
+                    "sermaye artırımı", "bedelsiz", "ortaklık", "ihale", "olağanüstü", 
+                    "spk", "yasak", "açığa satış"
+                ]
+
+                if any(k in text_lower for k in kritik_kelimeler):
+                    processed_links.add(link)
+                    # Dosyaya kaydet ki tekrar tekrar bildirim atmasın
+                    with open(PROCESSED_NEWS_FILE, "w", encoding="utf-8") as f:
+                        json.dump(list(processed_links)[-200:], f)
+
+                    # SESLİ ve YAZILI bildirim gönder
+                    alert_msg = (
+                        f"🚨 <b>[KRİTİK PİYASA / HABER UYARISI]</b> 🚨\n\n"
+                        f"📌 <b>Başlık:</b> {title}\n"
+                        f"🔗 <a href='{link}'>Haber Detayı İçin Tıklayın</a>"
+                    )
+                    send_telegram_msg(alert_msg, sound_alert=True)
+                    time.sleep(1)
+        except Exception as e:
+            logger.debug(f"Haber arka plan tarama hatası: {e}")
+        
+        # Her 10 dakikada bir kontrol eder
+        time.sleep(600)
 
 def analyze_ticker(symbol: str):
     try:
@@ -261,13 +288,10 @@ def analyze_ticker(symbol: str):
         avg_vol_20 = df_daily["Volume"].iloc[-20:].mean()
         tahta_durumu = "⚠️ Sığ Tahta" if avg_vol_20 < 400_000 else "🟢 Likit Tahta"
 
-        kap_ozeti, kap_onemli = get_kap_news_api(symbol)
-
-        # Ana Stratejiler (eski hali korundu)
+        # Kriterler: Gece 23:00 için artıda kapama şartı da eklenmiştir (change_pct > 0)
         strateji_a = (rsi_d < 30 and rsi_w < 32 and stoch_alimda and hacim_tl >= 20_000_000 and rvol >= 1.0 and change_pct > 0)
-        strateji_b = (bb_destek and (pb_ratio is not None and pb_ratio < 1.5) and rvol_5 >= 1.2 and asiri_zarar_yok and hacim_tl >= 8_000_000 and change_pct > -1)
+        strateji_b = (bb_destek and (pb_ratio is not None and pb_ratio < 1.5) and rvol_5 >= 1.2 and asiri_zarar_yok and hacim_tl >= 8_000_000 and change_pct > 0)
 
-        # Ek listeler için
         yuzde_5_ustu = change_pct >= 5.0 and hacim_tl >= 5_000_000
         hacim_patlamasi = hacim_tl >= 20_000_000 and rvol >= 1.0
 
@@ -277,14 +301,8 @@ def analyze_ticker(symbol: str):
         yildiz = 3
         if rvol >= 2.0 or rvol_5 >= 2.0: yildiz += 1
         if bb_destek: yildiz += 1
-        if kap_onemli: yildiz += 1
         if pb_ratio and pb_ratio < 1.0: yildiz += 1
         yildizlar = "⭐" * min(yildiz, 5)
-
-        ema9 = df_daily.ta.ema(length=9)
-        trend_kirilimi = False
-        if ema9 is not None:
-            trend_kirilimi = (last_close > float(ema9.iloc[-1])) and (prev_close <= float(ema9.iloc[-2]))
 
         return {
             "symbol": symbol,
@@ -299,9 +317,6 @@ def analyze_ticker(symbol: str):
             "tahta_durumu": tahta_durumu,
             "sl": round(stop_loss, 2),
             "tp": round(take_profit, 2),
-            "kap_ozeti": kap_ozeti,
-            "kap_onemli": kap_onemli,
-            "trend_kirilimi": trend_kirilimi,
             "yildizlar": yildizlar,
             "pb_ratio": round(pb_ratio, 2) if pb_ratio else None,
             "strateji_a": strateji_a,
@@ -314,8 +329,7 @@ def analyze_ticker(symbol: str):
         return None
 
 def scan_bist_stocks(symbol_list, scan_time: str):
-    now_str = datetime.now(TZ).strftime("%H:%M:%S")
-    logger.info(f"[{now_str}] Tarama başladı → {scan_time} | {len(symbol_list)} hisse")
+    logger.info(f"Tarama başladı → {scan_time} | {len(symbol_list)} hisse")
 
     ana_liste = []
     yuzde5_liste = []
@@ -333,34 +347,27 @@ def scan_bist_stocks(symbol_list, scan_time: str):
                 if res["hacim_patlamasi"]:
                     hacim_liste.append(res)
 
-    ana_liste.sort(key=lambda x: (x["kap_onemli"], x["rvol"]), reverse=True)
+    ana_liste.sort(key=lambda x: x["rvol"], reverse=True)
     yuzde5_liste.sort(key=lambda x: x["change_pct"], reverse=True)
     hacim_liste.sort(key=lambda x: x["hacim_tl_raw"], reverse=True)
 
     baslik_ek = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMASI"
     tarih = datetime.now(TZ).strftime('%d.%m.%Y - %H:%M')
 
-    # ========== 1. ANA LİSTE (Eski detaylı format) ==========
+    # ========== 1. ANA LİSTE ==========
     if ana_liste:
         mesaj = f"🎯 <b>[DİP + BB + DÜŞÜK PD/DD AVCISI | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
         for item in ana_liste:
-            uyari = "🚨" if item["kap_onemli"] else ""
-            durum = f"🚀 <b>Durum:</b> DÜŞEN KIRILIMI ONAYLANDI {item['yildizlar']}" if item["trend_kirilimi"] else f"📊 <b>Durum:</b> Dipte Güç Topluyor {item['yildizlar']}"
             strateji_adi = "Klasik Dip" if item["strateji_a"] else "BB Alt + Düşük PD/DD"
-
             hisse_str = (
-                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']}) {uyari}\n"
-                f"├ {durum}\n"
-                f"├ <b>Strateji:</b> {strateji_adi}\n"
-                f"├ <b>Hacim:</b> {item['hacim_tl']} TL | RVOL10: {item['rvol']}x | RVOL5: {item['rvol_5']}x\n"
+                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']})\n"
+                f"├ <b>Strateji:</b> {strateji_adi} {item['yildizlar']}\n"
+                f"├ <b>Hacim:</b> {item['hacim_tl']} TL | RVOL: {item['rvol']}x\n"
                 f"├ <b>RSI:</b> {item['rsi_d']} | Stoch: {item['stoch_k']} | {item['tahta_durumu']}\n"
             )
             if item.get("pb_ratio"):
                 hisse_str += f"├ <b>PD/DD:</b> {item['pb_ratio']}\n"
-            hisse_str += (
-                f"├ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n"
-                f"└ 📢 <b>KAP:</b> <i>{item['kap_ozeti']}</i>\n\n"
-            )
+            hisse_str += f"└ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n\n"
 
             if len(mesaj) + len(hisse_str) > 3800:
                 send_telegram_msg(mesaj)
@@ -370,33 +377,57 @@ def scan_bist_stocks(symbol_list, scan_time: str):
 
         if mesaj.strip():
             send_telegram_msg(mesaj)
-    else:
-        send_telegram_msg(f"ℹ️ <b>{scan_time}</b> - Ana stratejiye uyan hisse bulunamadı.")
 
-    # ========== 2. %5 VE ÜZERİ YÜKSELENLER ==========
+        # EĞER SAAT 23:00 ISE: Bu hisseleri dünkü referans olarak JSON dosyasına kaydet
+        if scan_time == "23:00":
+            night_data = {item["symbol"]: {"fiyat": item["fiyat"], "hacim": item["hacim_tl"], "rvol": item["rvol"]} for item in ana_liste}
+            try:
+                with open(TRACKING_FILE, "w", encoding="utf-8") as f:
+                    json.dump(night_data, f, ensure_ascii=False, indent=4)
+            except Exception as e:
+                logger.error(f"Kayıt hatası: {e}")
+
+    # ========== 2. ERTESİ GÜN SAAT 23:00'TE 24 SAATLİK KARŞILAŞTIRMA RAPORU ==========
+    if scan_time == "23:00" and os.path.exists(TRACKING_FILE):
+        try:
+            with open(TRACKING_FILE, "r", encoding="utf-8") as f:
+                old_data = json.load(f)
+
+            if old_data:
+                report_msg = "📋 <b>24 SAATLİK PERFORMANS KARŞILAŞTIRMA RAPORU (Dün 23:00 ➔ Bugün 23:00)</b>\n"
+                report_msg += "<code>Hisse adı - Fiyat - Hacim - Gör.hac - %artış</code>\n"
+                report_msg += "<code>--------------------------------------------------</code>\n"
+
+                for sym, old_info in old_data.items():
+                    # Güncel fiyatı çek
+                    curr_ticker = yf.Ticker(f"{sym}.IS")
+                    df_c = curr_ticker.history(period="2d", interval="1d", auto_adjust=True)
+                    if df_c is not None and not df_c.empty:
+                        curr_price = float(df_c["Close"].iloc[-1])
+                        curr_vol = float(df_c["Volume"].iloc[-1]) * curr_price
+                        curr_vol_str = format_compact_volume(curr_vol)
+                        
+                        old_price = old_info["fiyat"]
+                        old_vol_str = old_info["hacim"]
+                        old_rvol = old_info["rvol"]
+
+                        if old_price > 0:
+                            change_24h = ((curr_price - old_price) / old_price) * 100
+                        else:
+                            change_24h = 0.0
+
+                        sign = "+" if change_24h >= 0 else ""
+                        report_msg += f"• <b>{sym}</b> | {curr_price}TL | {curr_vol_str} | {old_rvol}x | <b>{sign}{change_24h:.2f}%</b>\n"
+
+                send_telegram_msg(report_msg)
+        except Exception as e:
+            logger.error(f"Karşılaştırma raporu oluşturulamadı: {e}")
+
+    # Diğer listeler (%5 ve Hacim patlaması)
     if yuzde5_liste:
         mesaj = f"🚀 <b>[%5 VE ÜZERİ YÜKSELENLER | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
         for item in yuzde5_liste[:15]:
-            mesaj += (
-                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> <b>(%+{item['change_pct']})</b>\n"
-                f"├ Hacim: {item['hacim_tl']} | RVOL: {item['rvol']}x\n"
-                f"└ KAP: <i>{item['kap_ozeti']}</i>\n\n"
-            )
-            if len(mesaj) > 3800:
-                send_telegram_msg(mesaj)
-                mesaj = ""
-        if mesaj.strip():
-            send_telegram_msg(mesaj)
-
-    # ========== 3. HACİM PATLAMASI LİSTESİ ==========
-    if hacim_liste:
-        mesaj = f"💥 <b>[HACİM PATLAMASI ≥20M + RVOL≥1 | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in hacim_liste[:15]:
-            mesaj += (
-                f"🔹 <b>#{item['symbol']}</b> | {item['fiyat']} TL (%+{item['change_pct']})\n"
-                f"├ Hacim: <b>{item['hacim_tl']}</b> | RVOL: <b>{item['rvol']}x</b>\n"
-                f"└ KAP: <i>{item['kap_ozeti']}</i>\n\n"
-            )
+            mesaj += f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']}) | Hacim: {item['hacim_tl']}\n"
             if len(mesaj) > 3800:
                 send_telegram_msg(mesaj)
                 mesaj = ""
@@ -409,19 +440,21 @@ def main():
     now = datetime.now(TZ)
     current_time_str = now.strftime("%H:%M")
 
+    # Arka planda 10 dakikada bir sesli uyarı verecek haber döngüsünü başlat
+    threading.Thread(target=check_important_market_news_background, daemon=True).start()
+
     send_telegram_msg(
-        "🤖 <b>BİST BOTU - DÜZELTİLMİŞ VERSİYON</b>\n"
-        "• Ana Liste (detaylı eski format)\n"
-        "• %5 ve üzeri yükselenler\n"
-        "• Hacim ≥20M + RVOL ≥1 listesi\n"
-        "🚀 Sistem aktif..."
+        "🤖 <b>BİST BOTU - 24 SAATLİK TAKİP & SESLİ HABER SİSTEMİ AKTİF</b>\n"
+        "• Gece 23:00 Kriterleri (Hacim, RSI, Stoch, Artıda Kapanış)\n"
+        "• Ertesi gün 23:00'te % Değişim Raporu\n"
+        "• 10 dk bir Akıllı Haber ve Sesli Uyarı Modülü\n"
+        "🚀 Sistem çalışıyor..."
     )
 
     try:
-        check_kap_news()
         hedef = get_all_bist_tickers()
         scan_bist_stocks(hedef, f"İLK AÇILIŞ TESTİ ({current_time_str})")
-        send_telegram_msg("✅ Açılış testi tamamlandı! Alarm saatleri bekleniyor.")
+        send_telegram_msg("✅ Açılış testi tamamlandı!")
     except Exception as e:
         send_telegram_msg(f"❌ Açılış hatası: {e}")
 
@@ -430,14 +463,13 @@ def main():
             now = datetime.now(TZ)
             loop_time = now.strftime("%H:%M")
             loop_date = now.strftime("%Y-%m-%d")
-            check_kap_news()
             scan_key = f"{loop_date}_{loop_time}"
+            
             if loop_time in TARGET_SCAN_TIMES and scan_key not in SCANNED_TIMES_TODAY:
                 hedef = get_all_bist_tickers()
                 scan_bist_stocks(hedef, loop_time)
                 SCANNED_TIMES_TODAY.add(scan_key)
                 if loop_time == "23:00":
-                    PROCESSED_KAP_LINKS.clear()
                     SCANNED_TIMES_TODAY.clear()
             time.sleep(25)
         except KeyboardInterrupt:
