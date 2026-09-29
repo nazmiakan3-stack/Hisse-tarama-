@@ -56,8 +56,7 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
-# Türkiye saati sabit UTC+3 (Sunucu saat farkı sorununu önler)
-TZ = timezone(timedelta(hours=3))
+TZ = timezone(timedelta(hours=3))  # Sabit Türkiye saati
 TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
 
 TRACKING_FILE = "gunluk_takip.json"
@@ -149,7 +148,7 @@ def send_telegram_msg(message: str, sound_alert: bool = False):
     }
 
     try:
-        requests.post(url, json=payload, timeout=12)
+        requests.post(url, json=payload, timeout=15)
     except Exception as e:
         logger.warning(f"Telegram gönderim hatası: {e}")
 
@@ -170,7 +169,7 @@ def get_all_bist_tickers():
     try:
         url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
         headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=8)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json().get("d", [])
             fetched = {item.get("code") for item in data if item.get("code") and len(item.get("code", "")) <= 5}
@@ -194,7 +193,7 @@ def check_important_market_news_background():
     while True:
         try:
             feed = feedparser.parse("https://www.kap.org.tr/tr/rss")
-            for entry in feed.entries[:12]:
+            for entry in feed.entries[:15]:
                 link = getattr(entry, "link", "")
                 if not link or link in processed_links:
                     continue
@@ -212,15 +211,15 @@ def check_important_market_news_background():
                 if any(k in text_lower for k in kritik_kelimeler):
                     processed_links.add(link)
                     with open(PROCESSED_NEWS_FILE, "w", encoding="utf-8") as f:
-                        json.dump(list(processed_links)[-250:], f)
+                        json.dump(list(processed_links)[-300:], f)
 
                     alert_msg = (
                         f"🚨 <b>[KRİTİK PİYASA / HABER UYARISI]</b> 🚨\n\n"
                         f"📌 <b>Başlık:</b> {title}\n"
-                        f"🔗 <a href='{link}'>Haber Detayı İçin Tıklayın</a>"
+                        f"🔗 <a href='{link}'>Haber Detayı</a>"
                     )
                     send_telegram_msg(alert_msg, sound_alert=True)
-                    time.sleep(1.2)
+                    time.sleep(1.5)
         except Exception as e:
             logger.debug(f"Haber tarama hatası: {e}")
 
@@ -233,16 +232,16 @@ def analyze_ticker(symbol: str):
         df_daily = ticker.history(period="6mo", interval="1d", auto_adjust=True)
         df_weekly = ticker.history(period="1y", interval="1wk", auto_adjust=True)
 
-        if df_daily is None or len(df_daily) < 35:
+        if df_daily is None or len(df_daily) < 40:
             return None
-        if df_weekly is None or len(df_weekly) < 15:
+        if df_weekly is None or len(df_weekly) < 20:
             return None
 
         last_close = float(df_daily["Close"].iloc[-1])
         prev_close = float(df_daily["Close"].iloc[-2])
         change_pct = ((last_close - prev_close) / prev_close) * 100
 
-        # ŞART: Hissenin günü mutlaka artı (+) kapatmış olması gerekir
+        # Sadece artı kapatanlar
         if change_pct <= 0:
             return None
 
@@ -303,6 +302,7 @@ def analyze_ticker(symbol: str):
         avg_vol_20 = df_daily["Volume"].iloc[-20:].mean()
         tahta_durumu = "⚠️ Sığ Tahta" if avg_vol_20 < 400_000 else "🟢 Likit Tahta"
 
+        # Stratejiler
         strateji_a = (
             rsi_d < 30 and rsi_w < 32 and stoch_alimda and
             hacim_tl >= 20_000_000 and rvol >= 1.0
@@ -313,7 +313,7 @@ def analyze_ticker(symbol: str):
         )
 
         yuzde_5_ustu = change_pct >= 5.0 and hacim_tl >= 5_000_000
-        hacim_patlamasi = hacim_tl >= 20_000_000 and rvol >= 1.5
+        hacim_patlamasi = hacim_tl >= 25_000_000 and rvol >= 1.8
 
         if not (strateji_a or strateji_b or yuzde_5_ustu or hacim_patlamasi):
             return None
@@ -348,7 +348,7 @@ def analyze_ticker(symbol: str):
             "hacim_patlamasi": hacim_patlamasi,
         }
     except Exception as e:
-        logger.debug(f"{symbol} hata: {e}")
+        logger.debug(f"{symbol} analiz hatası: {e}")
         return None
 
 
@@ -357,48 +357,90 @@ def scan_bist_stocks(symbol_list, scan_time: str):
 
     ana_liste = []
     yuzde5_liste = []
+    hacim_liste = []
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(analyze_ticker, sym): sym for sym in symbol_list}
         for future in as_completed(futures):
             res = future.result()
             if res:
-                if res["strateji_a"] or res["strateji_b"] or res["hacim_patlamasi"]:
+                if res["strateji_a"] or res["strateji_b"]:
                     ana_liste.append(res)
                 if res["yuzde_5_ustu"]:
                     yuzde5_liste.append(res)
+                if res["hacim_patlamasi"]:
+                    hacim_liste.append(res)
 
-    ana_liste.sort(key=lambda x: x["change_pct"], reverse=True)
+    # Sıralamalar
+    ana_liste.sort(key=lambda x: (x["rvol"], x["change_pct"]), reverse=True)
     yuzde5_liste.sort(key=lambda x: x["change_pct"], reverse=True)
+    hacim_liste.sort(key=lambda x: x["hacim_tl_raw"], reverse=True)
 
     baslik_ek = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMASI"
     tarih = datetime.now(TZ).strftime('%d.%m.%Y - %H:%M')
 
-    # ========== 1. LİSTE: ARTI KAPATANLAR (Giriş, SL ve TP Dahil) ==========
+    # ========== 1. LİSTE: DİP + BB + DÜŞÜK PD/DD ==========
     if ana_liste:
-        mesaj = f"🎯 <b>[1. LİSTE: ARTI KAPATAN & ŞARTLARI SAĞLAYANLAR | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
+        mesaj = f"🎯 <b>[1. LİSTE: DİP + BB + DÜŞÜK PD/DD | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
         for item in ana_liste:
-            strateji_adi = "Klasik Dip" if item["strateji_a"] else ("BB Alt + Düşük PD/DD" if item["strateji_b"] else "Hacim Patlaması")
+            strateji_adi = "Klasik Dip" if item["strateji_a"] else "BB Alt + Düşük PD/DD"
             hisse_str = (
                 f"🔹 <b>#{item['symbol']}</b>\n"
-                f"├ 📉 <b>Giriş (Fiyat):</b> {item['fiyat']} TL (<b>%+{item['change_pct']}</b>)\n"
-                f"├ 🛑 <b>Stop-Loss (SL):</b> {item['sl']} TL\n"
-                f"├ 🎯 <b>Take-Profit (TP):</b> {item['tp']} TL\n"
+                f"├ 📉 <b>Giriş:</b> {item['fiyat']} TL (<b>%+{item['change_pct']}</b>)\n"
+                f"├ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n"
                 f"├ <b>Strateji:</b> {strateji_adi} {item['yildizlar']}\n"
-                f"├ <b>Hacim:</b> {item['hacim_tl']} TL | RVOL: {item['rvol']}x\n"
-                f"└ <b>RSI:</b> {item['rsi_d']} | Stoch: {item['stoch_k']} | {item['tahta_durumu']}\n\n"
+                f"├ <b>Hacim:</b> {item['hacim_tl']} | RVOL: {item['rvol']}x\n"
+                f"├ <b>RSI:</b> {item['rsi_d']} | Stoch: {item['stoch_k']} | {item['tahta_durumu']}\n"
             )
+            if item.get("pb_ratio"):
+                hisse_str += f"├ <b>PD/DD:</b> {item['pb_ratio']}\n"
+            hisse_str += "\n"
 
             if len(mesaj) + len(hisse_str) > 3800:
                 send_telegram_msg(mesaj)
                 mesaj = ""
-                time.sleep(1)
+                time.sleep(1.2)
             mesaj += hisse_str
 
         if mesaj.strip():
             send_telegram_msg(mesaj)
 
-    # ========== 3. LİSTE: 24 SAATLİK YÜZDE DEĞİŞİM RAPORU ==========
+    # ========== 2. LİSTE: %5 VE ÜZERİ ==========
+    if yuzde5_liste:
+        mesaj = f"🚀 <b>[2. LİSTE: %5 VE ÜZERİ YÜKSELENLER | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
+        for item in yuzde5_liste[:20]:
+            mesaj += (
+                f"🔹 <b>#{item['symbol']}</b>\n"
+                f"├ 📉 <b>Giriş:</b> {item['fiyat']} TL (<b>%+{item['change_pct']}</b>)\n"
+                f"├ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n"
+                f"└ Hacim: {item['hacim_tl']} | RVOL: {item['rvol']}x\n\n"
+            )
+            if len(mesaj) > 3800:
+                send_telegram_msg(mesaj)
+                mesaj = ""
+                time.sleep(1.2)
+        if mesaj.strip():
+            send_telegram_msg(mesaj)
+
+    # ========== 3. LİSTE: HACİM PATLAMASI ==========
+    if hacim_liste:
+        mesaj = f"💥 <b>[3. LİSTE: HACİM PATLAMASI | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
+        for item in hacim_liste[:15]:
+            mesaj += (
+                f"🔹 <b>#{item['symbol']}</b>\n"
+                f"├ 📉 <b>Giriş:</b> {item['fiyat']} TL (<b>%+{item['change_pct']}</b>)\n"
+                f"├ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n"
+                f"├ Hacim: {item['hacim_tl']} | RVOL: <b>{item['rvol']}x</b>\n"
+                f"└ RSI: {item['rsi_d']} | Stoch: {item['stoch_k']}\n\n"
+            )
+            if len(mesaj) > 3800:
+                send_telegram_msg(mesaj)
+                mesaj = ""
+                time.sleep(1.2)
+        if mesaj.strip():
+            send_telegram_msg(mesaj)
+
+    # ========== 4. LİSTE: 24 SAATLİK PERFORMANS RAPORU ==========
     if scan_time == "23:00" and os.path.exists(TRACKING_FILE):
         try:
             with open(TRACKING_FILE, "r", encoding="utf-8") as f:
@@ -406,17 +448,14 @@ def scan_bist_stocks(symbol_list, scan_time: str):
 
             if old_data:
                 report_msg = (
-                    "📋 <b>3. LİSTE: ÖNCEKİ GECE LİSTELENENLERİN YÜZDE DEĞİŞİM RAPORU</b>\n"
+                    "📋 <b>4. LİSTE: ÖNCEKİ GECE LİSTESİNİN 24 SAATLİK PERFORMANSI</b>\n"
                     "<i>(Dün 23:00 → Bugün 23:00)</i>\n\n"
-                    "<code>Hisse | Fiyat | Hacim | Eski RVOL | % Değişim</code>\n"
-                    "<code>------------------------------------------------</code>\n"
                 )
-
                 for sym, old_info in old_data.items():
                     try:
                         curr_ticker = yf.Ticker(f"{sym}.IS")
                         df_c = curr_ticker.history(period="5d", interval="1d", auto_adjust=True)
-                        if df_c is not None and not df_c.empty:
+                        if df_c is not None and len(df_c) > 0:
                             curr_price = float(df_c["Close"].iloc[-1])
                             curr_vol = float(df_c["Volume"].iloc[-1]) * curr_price
                             curr_vol_str = format_compact_volume(curr_vol)
@@ -429,16 +468,16 @@ def scan_bist_stocks(symbol_list, scan_time: str):
 
                             report_msg += (
                                 f"• <b>{sym}</b> | {curr_price:.2f} TL | {curr_vol_str} | "
-                                f"{old_rvol}x | <b>{sign}{change_24h:.2f}%</b>\n"
+                                f"Eski RVOL: {old_rvol}x | <b>{sign}{change_24h:.2f}%</b>\n"
                             )
                     except Exception as e:
-                        logger.debug(f"{sym} 24s hesaplama hatası: {e}")
+                        logger.debug(f"{sym} 24s hata: {e}")
 
                 send_telegram_msg(report_msg)
         except Exception as e:
             logger.error(f"24 saatlik rapor hatası: {e}")
 
-    # Yeni gece listesini kaydet
+    # Yeni gece listesini kaydet (rapordan sonra)
     if scan_time == "23:00" and ana_liste:
         night_data = {
             item["symbol"]: {
@@ -455,26 +494,8 @@ def scan_bist_stocks(symbol_list, scan_time: str):
         except Exception as e:
             logger.error(f"Takip dosyası kayıt hatası: {e}")
 
-    # ========== 2. LİSTE: %5 VE ÜZERİ KAPATANLAR (Giriş, SL ve TP Dahil) ==========
-    if yuzde5_liste:
-        mesaj = f"🚀 <b>[2. LİSTE: %5 VE ÜZERİ YÜKSELENLER | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in yuzde5_liste[:18]:
-            mesaj += (
-                f"🔹 <b>#{item['symbol']}</b>\n"
-                f"├ 📉 <b>Giriş (Fiyat):</b> {item['fiyat']} TL (<b>%+{item['change_pct']}</b>)\n"
-                f"├ 🛑 <b>Stop-Loss (SL):</b> {item['sl']} TL\n"
-                f"├ 🎯 <b>Take-Profit (TP):</b> {item['tp']} TL\n"
-                f"└ Hacim: {item['hacim_tl']} TL\n\n"
-            )
-            if len(mesaj) > 3800:
-                send_telegram_msg(mesaj)
-                mesaj = ""
-                time.sleep(1)
-        if mesaj.strip():
-            send_telegram_msg(mesaj)
-
     logger.info(
-        f"Tarama bitti → 1. Liste: {len(ana_liste)} | 2. Liste: {len(yuzde5_liste)}"
+        f"Tarama bitti → Dip: {len(ana_liste)} | %5+: {len(yuzde5_liste)} | Hacim: {len(hacim_liste)}"
     )
 
 
@@ -485,11 +506,13 @@ def main():
     threading.Thread(target=check_important_market_news_background, daemon=True).start()
 
     send_telegram_msg(
-        f"🤖 <b>BİST BOTU - BAŞLATILDI (Dosya: {NOTEBOOK_FILE_NAME})</b>\n"
-        f"• 1. Liste: Teknik Şartları Sağlayan ve Günü Artı Kapatanlar (Giriş, SL, TP Dahil)\n"
-        f"• 2. Liste: Günü %5 ve Üzerinde Kapatanlar (Giriş, SL, TP Dahil)\n"
-        f"• 3. Liste: Önceki Gece Listelenenlerin Ertesi Gün % Değişim Raporu\n"
-        f"🚀 Sistem aktif ve çalışıyor..."
+        f"🤖 <b>BİST BOTU BAŞLATILDI</b>\n"
+        f"Dosya: <code>{NOTEBOOK_FILE_NAME}</code>\n\n"
+        f"• 1. Liste → Dip + BB + Düşük PD/DD (SL & TP dahil)\n"
+        f"• 2. Liste → %5 ve üzeri yükselenler\n"
+        f"• 3. Liste → Hacim Patlaması\n"
+        f"• 4. Liste → Önceki gecenin 24 saatlik performansı\n"
+        f"🚀 Sistem aktif..."
     )
 
     try:
