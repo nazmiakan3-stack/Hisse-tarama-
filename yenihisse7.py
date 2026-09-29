@@ -6,8 +6,7 @@ import json
 import time
 import threading
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -57,12 +56,13 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
-TZ = ZoneInfo("Europe/Istanbul")
+# Türkiye saati sabit UTC+3 (Sunucu saat farkı sorununu önler)
+TZ = timezone(timedelta(hours=3))
 TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
 
 TRACKING_FILE = "gunluk_takip.json"
 PROCESSED_NEWS_FILE = "islenen_haberler.json"
-NOTEBOOK_FILE_NAME = "Hisse"  # Başlangıç mesajında belirtilecek dosya adı
+NOTEBOOK_FILE_NAME = "Hisse"
 
 BIST_30_SET = {
     "AKBNK", "ALARK", "ASELS", "ASTOR", "BIMAS", "BRSAN", "DOAS", "EKGYO",
@@ -484,7 +484,6 @@ def main():
 
     threading.Thread(target=check_important_market_news_background, daemon=True).start()
 
-    # Başlangıç mesajına dosya adı eklendi
     send_telegram_msg(
         f"🤖 <b>BİST BOTU - BAŞLATILDI (Dosya: {NOTEBOOK_FILE_NAME})</b>\n"
         f"• 1. Liste: Teknik Şartları Sağlayan ve Günü Artı Kapatanlar (Giriş, SL, TP Dahil)\n"
