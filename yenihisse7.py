@@ -62,6 +62,7 @@ TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
 
 TRACKING_FILE = "gunluk_takip.json"
 PROCESSED_NEWS_FILE = "islenen_haberler.json"
+NOTEBOOK_FILE_NAME = "Hisse"  # Başlangıç mesajında belirtilecek dosya adı
 
 BIST_30_SET = {
     "AKBNK", "ALARK", "ASELS", "ASTOR", "BIMAS", "BRSAN", "DOAS", "EKGYO",
@@ -241,6 +242,10 @@ def analyze_ticker(symbol: str):
         prev_close = float(df_daily["Close"].iloc[-2])
         change_pct = ((last_close - prev_close) / prev_close) * 100
 
+        # ŞART: Hissenin günü mutlaka artı (+) kapatmış olması gerekir
+        if change_pct <= 0:
+            return None
+
         last_volume = float(df_daily["Volume"].iloc[-1])
         hacim_tl = last_volume * last_close
 
@@ -298,14 +303,13 @@ def analyze_ticker(symbol: str):
         avg_vol_20 = df_daily["Volume"].iloc[-20:].mean()
         tahta_durumu = "⚠️ Sığ Tahta" if avg_vol_20 < 400_000 else "🟢 Likit Tahta"
 
-        # Stratejiler
         strateji_a = (
             rsi_d < 30 and rsi_w < 32 and stoch_alimda and
-            hacim_tl >= 20_000_000 and rvol >= 1.0 and change_pct > 0
+            hacim_tl >= 20_000_000 and rvol >= 1.0
         )
         strateji_b = (
             bb_destek and (pb_ratio is not None and pb_ratio < 1.5) and
-            rvol_5 >= 1.2 and asiri_zarar_yok and hacim_tl >= 8_000_000 and change_pct > 0
+            rvol_5 >= 1.2 and asiri_zarar_yok and hacim_tl >= 8_000_000
         )
 
         yuzde_5_ustu = change_pct >= 5.0 and hacim_tl >= 5_000_000
@@ -353,41 +357,37 @@ def scan_bist_stocks(symbol_list, scan_time: str):
 
     ana_liste = []
     yuzde5_liste = []
-    hacim_liste = []
 
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {executor.submit(analyze_ticker, sym): sym for sym in symbol_list}
         for future in as_completed(futures):
             res = future.result()
             if res:
-                if res["strateji_a"] or res["strateji_b"]:
+                if res["strateji_a"] or res["strateji_b"] or res["hacim_patlamasi"]:
                     ana_liste.append(res)
                 if res["yuzde_5_ustu"]:
                     yuzde5_liste.append(res)
-                if res["hacim_patlamasi"]:
-                    hacim_liste.append(res)
 
-    ana_liste.sort(key=lambda x: x["rvol"], reverse=True)
+    ana_liste.sort(key=lambda x: x["change_pct"], reverse=True)
     yuzde5_liste.sort(key=lambda x: x["change_pct"], reverse=True)
-    hacim_liste.sort(key=lambda x: x["hacim_tl_raw"], reverse=True)
 
     baslik_ek = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMASI"
     tarih = datetime.now(TZ).strftime('%d.%m.%Y - %H:%M')
 
-    # ========== 1. ANA LİSTE (DİP + BB + DÜŞÜK PD/DD) ==========
+    # ========== 1. LİSTE: ARTI KAPATANLAR (Giriş, SL ve TP Dahil) ==========
     if ana_liste:
-        mesaj = f"🎯 <b>[DİP + BB + DÜŞÜK PD/DD AVCISI | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
+        mesaj = f"🎯 <b>[1. LİSTE: ARTI KAPATAN & ŞARTLARI SAĞLAYANLAR | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
         for item in ana_liste:
-            strateji_adi = "Klasik Dip" if item["strateji_a"] else "BB Alt + Düşük PD/DD"
+            strateji_adi = "Klasik Dip" if item["strateji_a"] else ("BB Alt + Düşük PD/DD" if item["strateji_b"] else "Hacim Patlaması")
             hisse_str = (
-                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']})\n"
+                f"🔹 <b>#{item['symbol']}</b>\n"
+                f"├ 📉 <b>Giriş (Fiyat):</b> {item['fiyat']} TL (<b>%+{item['change_pct']}</b>)\n"
+                f"├ 🛑 <b>Stop-Loss (SL):</b> {item['sl']} TL\n"
+                f"├ 🎯 <b>Take-Profit (TP):</b> {item['tp']} TL\n"
                 f"├ <b>Strateji:</b> {strateji_adi} {item['yildizlar']}\n"
                 f"├ <b>Hacim:</b> {item['hacim_tl']} TL | RVOL: {item['rvol']}x\n"
-                f"├ <b>RSI:</b> {item['rsi_d']} | Stoch: {item['stoch_k']} | {item['tahta_durumu']}\n"
+                f"└ <b>RSI:</b> {item['rsi_d']} | Stoch: {item['stoch_k']} | {item['tahta_durumu']}\n\n"
             )
-            if item.get("pb_ratio"):
-                hisse_str += f"├ <b>PD/DD:</b> {item['pb_ratio']}\n"
-            hisse_str += f"└ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n\n"
 
             if len(mesaj) + len(hisse_str) > 3800:
                 send_telegram_msg(mesaj)
@@ -398,7 +398,7 @@ def scan_bist_stocks(symbol_list, scan_time: str):
         if mesaj.strip():
             send_telegram_msg(mesaj)
 
-    # ========== 2. 24 SAATLİK PERFORMANS RAPORU (ÖNCE ESKİ VERİYİ OKU) ==========
+    # ========== 3. LİSTE: 24 SAATLİK YÜZDE DEĞİŞİM RAPORU ==========
     if scan_time == "23:00" and os.path.exists(TRACKING_FILE):
         try:
             with open(TRACKING_FILE, "r", encoding="utf-8") as f:
@@ -406,7 +406,7 @@ def scan_bist_stocks(symbol_list, scan_time: str):
 
             if old_data:
                 report_msg = (
-                    "📋 <b>24 SAATLİK PERFORMANS KARŞILAŞTIRMA RAPORU</b>\n"
+                    "📋 <b>3. LİSTE: ÖNCEKİ GECE LİSTELENENLERİN YÜZDE DEĞİŞİM RAPORU</b>\n"
                     "<i>(Dün 23:00 → Bugün 23:00)</i>\n\n"
                     "<code>Hisse | Fiyat | Hacim | Eski RVOL | % Değişim</code>\n"
                     "<code>------------------------------------------------</code>\n"
@@ -438,7 +438,7 @@ def scan_bist_stocks(symbol_list, scan_time: str):
         except Exception as e:
             logger.error(f"24 saatlik rapor hatası: {e}")
 
-    # ========== 3. YENİ GECE LİSTESİNİ KAYDET (RAPORDAN SONRA) ==========
+    # Yeni gece listesini kaydet
     if scan_time == "23:00" and ana_liste:
         night_data = {
             item["symbol"]: {
@@ -455,26 +455,16 @@ def scan_bist_stocks(symbol_list, scan_time: str):
         except Exception as e:
             logger.error(f"Takip dosyası kayıt hatası: {e}")
 
-    # ========== 4. %5 VE ÜZERİ YÜKSELENLER ==========
+    # ========== 2. LİSTE: %5 VE ÜZERİ KAPATANLAR (Giriş, SL ve TP Dahil) ==========
     if yuzde5_liste:
-        mesaj = f"🚀 <b>[%5 VE ÜZERİ YÜKSELENLER | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
+        mesaj = f"🚀 <b>[2. LİSTE: %5 VE ÜZERİ YÜKSELENLER | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
         for item in yuzde5_liste[:18]:
-            mesaj += f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']}) | Hacim: {item['hacim_tl']}\n"
-            if len(mesaj) > 3800:
-                send_telegram_msg(mesaj)
-                mesaj = ""
-                time.sleep(1)
-        if mesaj.strip():
-            send_telegram_msg(mesaj)
-
-    # ========== 5. HACİM PATLAMASI ==========
-    if hacim_liste:
-        mesaj = f"💥 <b>[HACİM PATLAMASI | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in hacim_liste[:15]:
             mesaj += (
-                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']})\n"
-                f"├ Hacim: {item['hacim_tl']} TL | RVOL: {item['rvol']}x\n"
-                f"└ RSI: {item['rsi_d']} | Stoch: {item['stoch_k']}\n\n"
+                f"🔹 <b>#{item['symbol']}</b>\n"
+                f"├ 📉 <b>Giriş (Fiyat):</b> {item['fiyat']} TL (<b>%+{item['change_pct']}</b>)\n"
+                f"├ 🛑 <b>Stop-Loss (SL):</b> {item['sl']} TL\n"
+                f"├ 🎯 <b>Take-Profit (TP):</b> {item['tp']} TL\n"
+                f"└ Hacim: {item['hacim_tl']} TL\n\n"
             )
             if len(mesaj) > 3800:
                 send_telegram_msg(mesaj)
@@ -484,7 +474,7 @@ def scan_bist_stocks(symbol_list, scan_time: str):
             send_telegram_msg(mesaj)
 
     logger.info(
-        f"Tarama bitti → Ana: {len(ana_liste)} | %5+: {len(yuzde5_liste)} | Hacim: {len(hacim_liste)}"
+        f"Tarama bitti → 1. Liste: {len(ana_liste)} | 2. Liste: {len(yuzde5_liste)}"
     )
 
 
@@ -492,16 +482,15 @@ def main():
     now = datetime.now(TZ)
     current_time_str = now.strftime("%H:%M")
 
-    # Arka plan haber tarayıcısını başlat
     threading.Thread(target=check_important_market_news_background, daemon=True).start()
 
+    # Başlangıç mesajına dosya adı eklendi
     send_telegram_msg(
-        "🤖 <b>BİST BOTU - 24 SAATLİK TAKİP & SESLİ HABER SİSTEMİ AKTİF</b>\n"
-        "• Gece 23:00 Kriterleri (Hacim, RSI, Stoch, Artıda Kapanış)\n"
-        "• Ertesi gün 23:00'te % Değişim Raporu\n"
-        "• 10 dk bir Akıllı Haber ve Sesli Uyarı Modülü\n"
-        "• Hacim Patlaması + %5+ Yükselenler\n"
-        "🚀 Sistem çalışıyor..."
+        f"🤖 <b>BİST BOTU - BAŞLATILDI (Dosya: {NOTEBOOK_FILE_NAME})</b>\n"
+        f"• 1. Liste: Teknik Şartları Sağlayan ve Günü Artı Kapatanlar (Giriş, SL, TP Dahil)\n"
+        f"• 2. Liste: Günü %5 ve Üzerinde Kapatanlar (Giriş, SL, TP Dahil)\n"
+        f"• 3. Liste: Önceki Gece Listelenenlerin Ertesi Gün % Değişim Raporu\n"
+        f"🚀 Sistem aktif ve çalışıyor..."
     )
 
     try:
