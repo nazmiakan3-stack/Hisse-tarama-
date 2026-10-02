@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BIST Bot — Tek Dosya
+BIST Bot — Tek Dosya (Sanal Cüzdan Entegre)
 - Ana liste (Dip + BB + düşük PD/DD)
 - %5+ yükselenler
 - Hacim ≥20M + RVOL ≥1
-- 23:00 Gece Bülteni (yarının tavan adayları kaydedilir)
-- Ertesi gün 23:00: dün gece adaylarının kapanış % performans raporu
+- 23:00 Gece Bülteni
+- 20.000 ₺ Sanal Cüzdan (sadece Ana stratejiden alım)
+- Hafta içi 09:00-18:00 + resmi tatil hariç işlem
+- Yüksek hacim + yükseliş devam → satma
 """
 
 import os
@@ -74,6 +76,31 @@ TZ = ZoneInfo("Europe/Istanbul")
 TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
 
 NIGHT_CANDIDATES_FILE = Path("night_candidates.json")
+PORTFOLIO_FILE = Path("portfolio.json")
+
+INITIAL_CAPITAL = 20000.0
+MAX_POSITIONS = 5
+BREAKEVEN_TRIGGER_PCT = 2.0
+
+# 2026 Resmi Tatiller (tam gün)
+HOLIDAYS_2026 = {
+    "2026-01-01",
+    "2026-03-20", "2026-03-21", "2026-03-22",
+    "2026-04-23",
+    "2026-05-01",
+    "2026-05-19",
+    "2026-05-27", "2026-05-28", "2026-05-29", "2026-05-30",
+    "2026-07-15",
+    "2026-08-30",
+    "2026-10-29",
+}
+
+# Yarım gün tatiller (13:00'dan sonra kapalı)
+HALF_DAY_HOLIDAYS_2026 = {
+    "2026-03-19",
+    "2026-05-26",
+    "2026-10-28",
+}
 
 KAP_STAR_MAP = {
     "bedelsiz": ("⭐⭐⭐⭐⭐", "Yüksek Oranlı Bedelsiz / Sermaye Artırımı"),
@@ -206,6 +233,22 @@ def get_all_bist_tickers():
     return sorted(list(set(FULL_BIST_LIST) | BIST_30_SET))
 
 
+def is_trading_time() -> bool:
+    """Hafta içi + resmi tatil hariç + 09:00-18:00"""
+    now = datetime.now(TZ)
+    today_str = now.strftime("%Y-%m-%d")
+    weekday = now.weekday()
+    current_time = now.strftime("%H:%M")
+
+    if weekday >= 5:
+        return False
+    if today_str in HOLIDAYS_2026:
+        return False
+    if today_str in HALF_DAY_HOLIDAYS_2026:
+        return "09:00" <= current_time < "13:00"
+    return "09:00" <= current_time <= "18:00"
+
+
 # ============================================================
 # KAP
 # ============================================================
@@ -257,7 +300,7 @@ def get_kap_news_api(symbol: str):
 
 
 # ============================================================
-# GECE ADAYLARI (JSON)
+# GECE ADAYLARI
 # ============================================================
 def load_night_candidates():
     try:
@@ -314,7 +357,6 @@ def fetch_close_snapshot(symbol: str):
 
 
 def send_previous_night_performance_report():
-    """Dün 23:00 tavan adaylarının bugün kapanış performansı."""
     data = load_night_candidates()
     items = data.get("items") or {}
     source_date = data.get("date", "?")
@@ -408,7 +450,6 @@ def send_previous_night_performance_report():
 
 
 def send_night_summary_table(ana_liste, yuzde5_liste, hacim_liste):
-    """23:00 kompakt özet: Hisse | Fiyat | Günlük % | Hacim"""
     merged = {}
     for lst in (ana_liste, yuzde5_liste, hacim_liste):
         for it in lst:
@@ -445,6 +486,232 @@ def send_night_summary_table(ana_liste, yuzde5_liste, hacim_liste):
             time.sleep(0.8)
     msg += "</pre>"
     send_telegram_msg(msg)
+
+
+# ============================================================
+# SANAL PORTFÖY
+# ============================================================
+def load_portfolio():
+    try:
+        if PORTFOLIO_FILE.exists():
+            with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"portfolio okunamadı: {e}")
+    return {
+        "capital": INITIAL_CAPITAL,
+        "cash": INITIAL_CAPITAL,
+        "positions": {},
+        "closed": [],
+        "last_update": None
+    }
+
+
+def save_portfolio(portfolio: dict):
+    try:
+        portfolio["last_update"] = datetime.now(TZ).isoformat()
+        with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
+            json.dump(portfolio, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"portfolio yazılamadı: {e}")
+
+
+def get_current_price(symbol: str):
+    try:
+        t = yf.Ticker(f"{symbol}.IS")
+        df = t.history(period="5d", interval="1d", auto_adjust=True)
+        if df is None or df.empty:
+            return None
+        return float(df["Close"].iloc[-1])
+    except Exception:
+        return None
+
+
+def open_positions_from_ana_liste(ana_liste: list):
+    """Sadece işlem saatlerinde ve Ana stratejiden alım yapar."""
+    if not is_trading_time():
+        logger.info("İşlem saatleri dışında, yeni pozisyon açılmıyor.")
+        return
+
+    if not ana_liste:
+        return
+
+    portfolio = load_portfolio()
+    open_count = len(portfolio["positions"])
+
+    if open_count >= MAX_POSITIONS:
+        logger.info("Maksimum pozisyon sayısına ulaşıldı.")
+        return
+
+    available = [item for item in ana_liste if item["symbol"] not in portfolio["positions"]]
+    if not available:
+        return
+
+    remaining_slots = MAX_POSITIONS - open_count
+    to_buy = available[:remaining_slots]
+
+    cash = portfolio["cash"]
+    if cash < 500:
+        logger.info("Nakit yetersiz.")
+        return
+
+    per_position = cash / len(to_buy)
+
+    for item in to_buy:
+        symbol = item["symbol"]
+        price = item["fiyat"]
+        if price <= 0:
+            continue
+
+        qty = int(per_position // price)
+        if qty < 1:
+            continue
+
+        cost = qty * price
+        if cost > cash:
+            continue
+
+        sl = item["sl"]
+        tp = item["tp"]
+
+        portfolio["positions"][symbol] = {
+            "entry": price,
+            "qty": qty,
+            "sl": sl,
+            "tp": tp,
+            "original_sl": sl,
+            "cost": round(cost, 2),
+            "entry_date": datetime.now(TZ).strftime("%Y-%m-%d"),
+            "strategy": "DİP+BB+DüşükPD/DD",
+            "breakeven_moved": False
+        }
+        cash -= cost
+        logger.info(f"ALIM → {symbol} | {qty} adet @ {price} | SL:{sl} TP:{tp}")
+
+    portfolio["cash"] = round(cash, 2)
+    save_portfolio(portfolio)
+
+    if portfolio["positions"]:
+        msg = "💰 <b>SANAL CÜZDAN — YENİ POZİSYONLAR</b>\n"
+        msg += f"📅 {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}\n"
+        msg += f"💵 Kalan Nakit: <b>{portfolio['cash']:,.2f} ₺</b>\n\n"
+        for sym, pos in portfolio["positions"].items():
+            msg += (
+                f"🔹 <b>#{sym}</b>\n"
+                f"├ Giriş: {pos['entry']} ₺ × {pos['qty']}\n"
+                f"├ 🛑 SL: {pos['sl']} | 🎯 TP: {pos['tp']}\n"
+                f"└ Maliyet: {pos['cost']:,.2f} ₺\n\n"
+            )
+        send_telegram_msg(msg)
+
+
+def update_portfolio():
+    """TP/SL + zarar etmeme + yüksek hacim/momentum kontrolü"""
+    portfolio = load_portfolio()
+    if not portfolio["positions"]:
+        return
+
+    closed_this_round = []
+    positions = portfolio["positions"].copy()
+
+    for symbol, pos in positions.items():
+        try:
+            t = yf.Ticker(f"{symbol}.IS")
+            df = t.history(period="10d", interval="1d", auto_adjust=True)
+            if df is None or len(df) < 5:
+                continue
+
+            current = float(df["Close"].iloc[-1])
+            prev_close = float(df["Close"].iloc[-2])
+            today_change_pct = ((current - prev_close) / prev_close) * 100
+
+            last_vol = float(df["Volume"].iloc[-1])
+            avg_vol_5 = float(df["Volume"].iloc[-6:-1].mean())
+            rvol = last_vol / avg_vol_5 if avg_vol_5 > 0 else 0
+
+            last_3_closes = df["Close"].iloc[-3:].values
+            is_rising = all(last_3_closes[i] <= last_3_closes[i+1] for i in range(len(last_3_closes)-1))
+            strong_momentum = (
+                rvol >= 2.0 and
+                today_change_pct > 0 and
+                is_rising and
+                current > pos["entry"]
+            )
+        except Exception:
+            current = get_current_price(symbol)
+            if current is None:
+                continue
+            today_change_pct = 0
+            rvol = 0
+            strong_momentum = False
+
+        entry = pos["entry"]
+        qty = pos["qty"]
+        pnl_pct = ((current - entry) / entry) * 100
+
+        # Zarar etmeme: %2+ kâr → SL girişe
+        if not pos.get("breakeven_moved") and pnl_pct >= BREAKEVEN_TRIGGER_PCT:
+            pos["sl"] = entry
+            pos["breakeven_moved"] = True
+            logger.info(f"{symbol} → SL girişe çekildi (breakeven)")
+
+        # Yüksek hacim + yükseliş devam → SATMA
+        if strong_momentum:
+            logger.info(f"{symbol} → Yüksek hacim + yükseliş devam, satılmıyor (RVOL:{rvol:.2f})")
+            portfolio["positions"][symbol] = pos
+            continue
+
+        # Take Profit
+        if current >= pos["tp"]:
+            profit = (current - entry) * qty
+            portfolio["cash"] += current * qty
+            closed_this_round.append({
+                "symbol": symbol,
+                "reason": "TP",
+                "entry": entry,
+                "exit": current,
+                "pnl": round(profit, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "qty": qty
+            })
+            del portfolio["positions"][symbol]
+            continue
+
+        # Stop Loss
+        if current <= pos["sl"]:
+            pnl = (current - entry) * qty
+            portfolio["cash"] += current * qty
+            closed_this_round.append({
+                "symbol": symbol,
+                "reason": "SL" if not pos.get("breakeven_moved") else "BREAKEVEN",
+                "entry": entry,
+                "exit": current,
+                "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "qty": qty
+            })
+            del portfolio["positions"][symbol]
+            continue
+
+        portfolio["positions"][symbol] = pos
+
+    if closed_this_round:
+        portfolio.setdefault("closed", []).extend(closed_this_round)
+
+        msg = "🔔 <b>SANAL CÜZDAN — POZİSYON KAPANDI</b>\n\n"
+        for c in closed_this_round:
+            emoji = "🟢" if c["pnl"] >= 0 else "🔴"
+            msg += (
+                f"{emoji} <b>#{c['symbol']}</b> → {c['reason']}\n"
+                f"├ Giriş: {c['entry']} → Çıkış: {c['exit']}\n"
+                f"├ Adet: {c['qty']}\n"
+                f"└ PnL: <b>{c['pnl']:+.2f} ₺ (%{c['pnl_pct']:+.2f})</b>\n\n"
+            )
+        msg += f"💵 Güncel Nakit: <b>{portfolio['cash']:,.2f} ₺</b>"
+        send_telegram_msg(msg)
+
+    portfolio["cash"] = round(portfolio["cash"], 2)
+    save_portfolio(portfolio)
 
 
 # ============================================================
@@ -680,15 +947,18 @@ def scan_bist_stocks(symbol_list, scan_time: str):
         if mesaj.strip():
             send_telegram_msg(mesaj)
 
+    # --- SANAL CÜZDAN ---
+    if ana_liste:
+        open_positions_from_ana_liste(ana_liste)
+
+    # Her taramada açık pozisyonları kontrol et
+    update_portfolio()
+
     # 4) 23:00 özel akış
     if scan_time == "23:00":
-        # Önce dün gece adaylarının bugünkü performansı
         send_previous_night_performance_report()
-
-        # Özet tablo (bu gece çıkanlar)
         send_night_summary_table(ana_liste, yuzde5_liste, hacim_liste)
 
-        # Bu gece adaylarını kaydet → yarın raporlanacak
         night_items = {}
         for lst in (ana_liste, yuzde5_liste, hacim_liste):
             for it in lst:
@@ -724,14 +994,11 @@ def main():
     current_time_str = now.strftime("%H:%M")
 
     send_telegram_msg(
-        "🤖 <b>BİST BOTU — TEK DOSYA</b>\n"
+        "🤖 <b>BİST BOTU — SANAL CÜZDAN ENTEGRE</b>\n"
         "⏰ 09:50 | 10:10 | 17:45 | 23:00\n"
-        "📋 Listeler:\n"
-        "• Dip + BB + düşük PD/DD\n"
-        "• %5+ yükselenler\n"
-        "• Hacim ≥20M + RVOL ≥1\n"
-        "• 23:00 Gece bülteni + özet tablo\n"
-        "• Ertesi gün 23:00: dün gece adaylarının % performans\n"
+        "💰 Sanal Cüzdan: 20.000 ₺\n"
+        "📋 Sadece DİP + BB + Düşük PD/DD listesinden alım\n"
+        "🕐 İşlem saatleri: Hafta içi 09:00-18:00 (tatil hariç)\n"
         "🚀 Sistem aktif..."
     )
 
@@ -759,7 +1026,6 @@ def main():
                 if loop_time == "23:00":
                     PROCESSED_KAP_LINKS.clear()
                     SCANNED_TIMES_TODAY.clear()
-                    # night_candidates.json SİLİNMEZ — yarınki rapor için kalır
 
             time.sleep(25)
         except KeyboardInterrupt:
