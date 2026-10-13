@@ -16,14 +16,12 @@ BIST Bot – Profesyonel Sanal Portföy (TEK DOSYA)
 import os
 import sys
 import time
-import json
 import logging
 import sqlite3
-import asyncio
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 
@@ -33,10 +31,9 @@ try:
     import yfinance as yf
     import pandas as pd
     import pandas_ta as ta
-    import httpx
 except ModuleNotFoundError as e:
     print(f"\n❌ Eksik kütüphane: {e}")
-    print("Kurulum: pip install requests yfinance pandas pandas-ta httpx python-dotenv\n")
+    print("Kurulum: pip install requests yfinance pandas pandas-ta python-dotenv\n")
     sys.exit(1)
 
 try:
@@ -65,13 +62,13 @@ BREAKOUT_VOLUME_MIN  = 15_000_000
 BB_VOLUME_MIN        = 8_000_000
 
 TZ = ZoneInfo("Europe/Istanbul")
-SCAN_TIMES   = ["09:50", "10:10", "17:45", "23:00"]
+SCAN_TIMES    = ["09:50", "10:10", "17:45", "23:00"]
 TRADING_START = "09:00"
 TRADING_END   = "18:00"
 
-BASE_DIR  = Path(__file__).resolve().parent
-DB_PATH   = BASE_DIR / "portfolio.db"
-LOG_DIR   = BASE_DIR / "logs"
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH  = BASE_DIR / "portfolio.db"
+LOG_DIR  = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 HOLIDAYS_FULL = {
@@ -196,7 +193,7 @@ def get_all_tickers() -> List[str]:
         res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
         if res.status_code == 200:
             data = res.json().get("d", [])
-            fetched = {item.get("code") for item in data if item.get("code") and len(item.get("code","")) <= 5}
+            fetched = {item.get("code") for item in data if item.get("code") and len(item.get("code", "")) <= 5}
             if len(fetched) >= 300:
                 logger.info(f"Canlı liste: {len(fetched)} hisse")
                 return sorted(list(fetched))
@@ -320,11 +317,7 @@ def scan_symbols(symbols: List[str], max_workers: int = 6) -> List[Dict]:
     priority = {"DIP": 4, "BB": 3, "BREAKOUT": 2, "MOMENTUM": 1}
     results.sort(key=lambda x: (priority.get(x["primary_strategy"], 0), x["rvol"]), reverse=True)
     return results
-    priority = {"DIP": 4, "BB": 3, "BREAKOUT": 2, "MOMENTUM": 1}
-    results.sort(key=lambda x: (priority.get(x["primary_strategy"], 0), x["rvol"]), reverse=True)
-    return results
-
-# ===================== PORTFÖY (SQLite) =====================
+    # ===================== PORTFÖY (SQLite) =====================
 class PortfolioManager:
     def __init__(self):
         self.db_path = DB_PATH
@@ -415,14 +408,14 @@ class PortfolioManager:
                     INSERT INTO positions
                     (symbol, entry, qty, sl, tp, original_sl, cost, entry_date, strategy, breakeven_moved)
                     VALUES (?,?,?,?,?,?,?,?,?,0)
-                """, (symbol, price, qty, sl, item["tp"], sl, round(cost,2),
+                """, (symbol, price, qty, sl, item["tp"], sl, round(cost, 2),
                       datetime.now(TZ).strftime("%Y-%m-%d"), strategy))
                 cash -= cost
                 opened.append({"symbol": symbol, "qty": qty, "entry": price,
                                "sl": sl, "tp": item["tp"], "cost": cost, "strategy": strategy})
                 logger.info(f"ALIM → {symbol} {qty} adet @ {price} [{strategy}]")
             conn.execute("UPDATE portfolio SET cash=?, updated_at=? WHERE id=1",
-                         (round(cash,2), datetime.now(TZ).isoformat()))
+                         (round(cash, 2), datetime.now(TZ).isoformat()))
         if opened:
             msg = "💰 <b>SANAL CÜZDAN — YENİ POZİSYONLAR</b>\n"
             msg += f"📅 {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}\n"
@@ -497,7 +490,7 @@ class PortfolioManager:
         conn.execute("""INSERT INTO closed_trades
             (symbol, entry, exit, qty, pnl, pnl_pct, reason, closed_at)
             VALUES (?,?,?,?,?,?,?,?)""",
-            (symbol, entry, exit_price, qty, round(pnl,2), round(pnl_pct,2),
+            (symbol, entry, exit_price, qty, round(pnl, 2), round(pnl_pct, 2),
              reason, datetime.now(TZ).isoformat()))
         conn.execute("UPDATE portfolio SET cash = cash + ?, updated_at=? WHERE id=1",
                      (exit_price * qty, datetime.now(TZ).isoformat()))
