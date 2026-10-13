@@ -1,192 +1,104 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BIST Bot — Tek Dosya (Sanal Cüzdan Entegre)
-- Ana liste (Dip + BB + düşük PD/DD)
-- %5+ yükselenler
-- Hacim ≥20M + RVOL ≥1
-- 23:00 Gece Bülteni
-- 20.000 ₺ Sanal Cüzdan (sadece Ana stratejiden alım)
-- Hafta içi 09:00-18:00 + resmi tatil hariç işlem
-- Yüksek hacim + yükseliş devam → satma
+BIST Bot – Profesyonel Sanal Portföy (TEK DOSYA)
+================================================
+- 4 Strateji: DIP, BB, BREAKOUT, MOMENTUM
+- 20.000 ₺ sanal cüzdan
+- Risk bazlı pozisyon büyüklüğü (%1.5 risk)
+- Hafta içi 09:00-18:00 + resmi tatil hariç
+- Yüksek hacim + momentum → satmama
+- %2 kâr → SL girişe (zarar etmeme)
+- SQLite kalıcı portföy
+- Telegram bildirimleri
 """
 
 import os
-import json
+import sys
 import time
-import threading
+import json
 import logging
+import sqlite3
+import asyncio
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from typing import List, Dict, Any, Optional, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from contextlib import contextmanager
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("BISTBot")
-
+# ===================== KÜTÜPHANELER =====================
 try:
     import requests
-    import feedparser
     import yfinance as yf
     import pandas as pd
     import pandas_ta as ta
+    import httpx
 except ModuleNotFoundError as e:
-    print(f"\n❌ EKSİK KÜTÜPHANE: {e}")
-    print("👉 pip install requests feedparser yfinance pandas pandas-ta\n")
-    exit(1)
+    print(f"\n❌ Eksik kütüphane: {e}")
+    print("Kurulum: pip install requests yfinance pandas pandas-ta httpx python-dotenv\n")
+    sys.exit(1)
 
-# ============================================================
-# HEALTH CHECK
-# ============================================================
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
-
-def start_health_check_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logger.info(f"Health-check port {port}")
-    server.serve_forever()
-
-
-threading.Thread(target=start_health_check_server, daemon=True).start()
-
-# ============================================================
-# AYARLAR
-# ============================================================
+# ===================== AYARLAR =====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
+
+INITIAL_CAPITAL      = float(os.getenv("INITIAL_CAPITAL", "20000"))
+MAX_POSITIONS        = int(os.getenv("MAX_POSITIONS", "5"))
+RISK_PER_TRADE_PCT   = float(os.getenv("RISK_PER_TRADE_PCT", "1.5"))
+MAX_POSITION_PCT     = float(os.getenv("MAX_POSITION_PCT", "25.0"))
+BREAKEVEN_TRIGGER    = float(os.getenv("BREAKEVEN_TRIGGER_PCT", "2.0"))
+
+RSI_DAILY_MAX        = 30.0
+RSI_WEEKLY_MAX       = 32.0
+MIN_VOLUME_TL_DIP    = 20_000_000
+MIN_RVOL             = 1.0
+MIN_RVOL_MOMENTUM    = 2.0
+BREAKOUT_RVOL_MIN    = 1.8
+BREAKOUT_VOLUME_MIN  = 15_000_000
+BB_VOLUME_MIN        = 8_000_000
 
 TZ = ZoneInfo("Europe/Istanbul")
-TARGET_SCAN_TIMES = ["09:50", "10:10", "17:45", "23:00"]
+SCAN_TIMES   = ["09:50", "10:10", "17:45", "23:00"]
+TRADING_START = "09:00"
+TRADING_END   = "18:00"
 
-NIGHT_CANDIDATES_FILE = Path("night_candidates.json")
-PORTFOLIO_FILE = Path("portfolio.json")
+BASE_DIR  = Path(__file__).resolve().parent
+DB_PATH   = BASE_DIR / "portfolio.db"
+LOG_DIR   = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
 
-INITIAL_CAPITAL = 20000.0
-MAX_POSITIONS = 5
-BREAKEVEN_TRIGGER_PCT = 2.0
-
-# 2026 Resmi Tatiller (tam gün)
-HOLIDAYS_2026 = {
-    "2026-01-01",
-    "2026-03-20", "2026-03-21", "2026-03-22",
-    "2026-04-23",
-    "2026-05-01",
-    "2026-05-19",
+HOLIDAYS_FULL = {
+    "2026-01-01", "2026-03-20", "2026-03-21", "2026-03-22",
+    "2026-04-23", "2026-05-01", "2026-05-19",
     "2026-05-27", "2026-05-28", "2026-05-29", "2026-05-30",
-    "2026-07-15",
-    "2026-08-30",
-    "2026-10-29",
+    "2026-07-15", "2026-08-30", "2026-10-29",
 }
+HALF_DAY_HOLIDAYS = {"2026-03-19", "2026-05-26", "2026-10-28"}
 
-# Yarım gün tatiller (13:00'dan sonra kapalı)
-HALF_DAY_HOLIDAYS_2026 = {
-    "2026-03-19",
-    "2026-05-26",
-    "2026-10-28",
-}
+# ===================== LOGGING =====================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_DIR / "bot.log", encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger("BISTBot")
 
-KAP_STAR_MAP = {
-    "bedelsiz": ("⭐⭐⭐⭐⭐", "Yüksek Oranlı Bedelsiz / Sermaye Artırımı"),
-    "yeni iş ilişkisi": ("⭐⭐⭐⭐⭐", "Yeni İş İlişkisi / Dev İhale"),
-    "ortaklık": ("⭐⭐⭐⭐⭐", "Stratejik İş Ortaklığı / M&A"),
-    "ihale": ("⭐⭐⭐⭐", "İhale Sözleşmesi / Dev Sipariş"),
-    "pay alım": ("⭐⭐⭐⭐", "Şirket Pay Geri Alımı"),
-}
-
-BIST_30_SET = {
-    "AKBNK", "ALARK", "ASELS", "ASTOR", "BIMAS", "BRSAN", "DOAS", "EKGYO",
-    "ENKAI", "EREGL", "FROTO", "GARAN", "GUBRF", "HEKTS", "ISCTR", "KCHOL",
-    "KONTR", "KOZAL", "KRDMD", "ODAS", "OYAKC", "PETKM", "PGSUS", "SAHOL",
-    "SASA", "SISE", "TCELL", "THYAO", "TOASO", "TUPRS",
-}
-
-FULL_BIST_LIST = [
-    "A1CAP", "AAVTUR", "ACSEL", "ADEL", "ADESE", "AEFES", "AFYON", "AGESA", "AGHOL",
-    "AGROT", "AHGAZ", "AKCNS", "AKENR", "AKFGY", "AKFYE", "AKGRT", "AKMGY", "AKSA",
-    "AKSEN", "AKSGY", "ALBRK", "ALCAR", "ALCTL", "ALFAS", "ALGYO", "ALKA", "ALKIM",
-    "ALMAD", "ALTNY", "ALVES", "ANELE", "ANGEN", "ANHYT", "ANSGR", "ARASE", "ARCLK",
-    "ARDYZ", "ARENA", "ARSAN", "ARTMS", "ARZUM", "ASGYO", "ASUZU", "ATAGY", "ATAKP",
-    "ATATP", "ATEKS", "ATLAS", "ATSYH", "AVGYO", "AVHOL", "AVOD", "AVPGY", "AYCES",
-    "AYDEM", "AYEN", "AYES", "AYGAZ", "AZTEK", "BAGFS", "BAKAB", "BALAT", "BANVT",
-    "BARMA", "BASGZ", "BAYRK", "BEAYO", "BEYAZ", "BFREN", "BIENY", "BIGCH", "BINHO",
-    "BIOEN", "BIZIM", "BJKAS", "BLCYT", "BMSCH", "BMSTL", "BNTAS", "BOBET", "BORLS",
-    "BORSK", "BOSSA", "BRISA", "BRKO", "BRKSN", "BRKVY", "BRLSM", "BRMEN", "BRYAT",
-    "BSOKE", "BTCIM", "BUCIM", "BURCE", "BURVA", "BVSAN", "BYDNR", "CANTE", "CASA",
-    "CATES", "CCOLA", "CELHA", "CEMAS", "CEMTS", "CEOEM", "CIMSA", "CLEBI", "CMBTN",
-    "CMENT", "CONSE", "COSMO", "CRDFA", "CRFSA", "CUSAN", "CVKMD", "CWENE", "DAGHL",
-    "DAGI", "DAPGM", "DARDL", "DATA", "DEFVA", "DERHL", "DERIM", "DESA", "DESPC",
-    "DEVA", "DGNMO", "DIRIT", "DITAS", "DMRGD", "DMSAS", "DOBUR", "DOCO", "DOFER",
-    "DOGUB", "DOHOL", "DOKTA", "DURDO", "DYOBY", "DZGYO", "EBEBK", "ECILC", "ECZYT",
-    "EDATA", "EDIP", "EGEEN", "EGEPO", "EGERT", "EGPRO", "EGSER", "EKIZ", "EKOS",
-    "EKSUN", "ELITE", "EMKEL", "ENERY", "ENJSA", "ENTRA", "EPLAS", "ERBOS", "ERCAN",
-    "ERSU", "ESCAR", "ESCOM", "ESEN", "ETILR", "ETYAT", "EUHOL", "EUREN", "EUYO",
-    "EYGYO", "FADE", "FENER", "FLAP", "FMIZP", "FONET", "FORMT", "FORTE", "FRIGO",
-    "FSYGM", "FZLGY", "GARFA", "GENTS", "GEREL", "GESAN", "GIPTA", "GLBMD", "GLCVY",
-    "GLRYH", "GLYHO", "GMTAS", "GOKNR", "GOLTS", "GOODY", "GOZDE", "GRNYO", "GRSEL",
-    "GRTRK", "GSDDE", "GSDHO", "GSRAY", "GWIND", "GZNMI", "HALKB", "HATEK", "HATSN",
-    "HDFGS", "HEDEF", "HKTM", "HLGYO", "HRZNO", "HSCSM", "HUBVC", "HUNER", "HURGZ",
-    "ICBCT", "ICUGS", "IDGYO", "IEYHO", "IHAAS", "IHEVA", "IHGZT", "IHLAS", "IHLGM",
-    "IHYAY", "IMASM", "INDES", "INFO", "INGRM", "INTEM", "INVEO", "INVES", "IPEKE",
-    "ISATR", "ISBIR", "ISBTR", "ISDMR", "ISFIN", "ISGSY", "ISGYO", "ISKPL", "ISKUR",
-    "ISMEN", "ISSEN", "ISYAT", "ITTFH", "IZENR", "IZFAS", "IZINV", "IZMDC", "JANTS",
-    "KALES", "KALEK", "KARSN", "KARTN", "KARYE", "KATMR", "KCAER", "KENT", "KERVN",
-    "KERVT", "KFEIN", "KGYO", "KIMMR", "KLGYO", "KLKIM", "KLMSN", "KLNMA", "KLRHO",
-    "KLSYN", "KMPUR", "KNFRT", "KOCMT", "KONKA", "KONYA", "KOPOL", "KORDS", "KOZAA",
-    "KRDMA", "KRDMB", "KRGYO", "KRONT", "KRPLS", "KRSTL", "KRTEK", "KRVGD", "KSTUR",
-    "KTLEV", "KTSKR", "KUTPO", "KUVVA", "KUYAS", "KZBGY", "KZGYO", "LIDER", "LIDFA",
-    "LINK", "LKMNH", "LOGO", "LRSHO", "LUKSK", "MAALT", "MACKO", "MACRO", "MAGEN",
-    "MAKIM", "MAKTK", "MANAS", "MARKA", "MARTI", "MAVI", "MAXOT", "MEDTR", "MEGAP",
-    "MEKAG", "MEPET", "MERCN", "MERIT", "MERKO", "METRO", "METUR", "MGROS", "MHRGY",
-    "MIATK", "MIPAZ", "MMCAS", "MNDRS", "MNDTR", "MOBTL", "MOGAN", "MPARK", "MRGYO",
-    "MRSHL", "MSGYO", "MTRKS", "MTRYO", "MUHAL", "MUREN", "NASHQ", "NATEN", "NETAS",
-    "NIBAS", "NTGAZ", "NTHOL", "NUGYO", "NUHCM", "OBASE", "OBAMS", "ODINE", "OFSYM",
-    "ONCSM", "ORCAY", "ORGE", "ORMA", "OSMEN", "OSTIM", "OTKAR", "OTTO", "OYAYO",
-    "OYLUM", "OYYAT", "OZGYO", "OZKGY", "OZRDN", "OZSUB", "PAGYO", "PAMEL", "PAPIL",
-    "PARSN", "PASEU", "PATEK", "PCILT", "PEGYO", "PEKGY", "PENGD", "PENTA", "PETUN",
-    "PINSU", "PKART", "PKENT", "PLTUR", "PNLSN", "PNSUT", "POLHO", "POLTK", "PRDGS",
-    "PRKAB", "PRKME", "PRZMA", "PSDTC", "PSGYO", "QNBFL", "QUAGR", "RALYH", "RAYSG",
-    "REEDR", "RNPOL", "RODRG", "ROYAL", "RTALB", "RUBNS", "RYGYO", "RYSAS", "SAMAT",
-    "SANEL", "SANFM", "SANKO", "SARKY", "SAYAS", "SDTTR", "SEGYO", "SEKFK", "SEKUR",
-    "SELEC", "SELGD", "SELVA", "SEYKM", "SILVR", "SKBNK", "SKTAS", "SMART", "SMRTG",
-    "SNGYO", "SNICA", "SNKRN", "SNPAM", "SNTCD", "SOKE", "SOKM", "SONME", "SRVGY",
-    "SUMAS", "SUNTK", "SURGY", "SUWEN", "TABGD", "TARKM", "TATEN", "TATGD", "TAVHL",
-    "TBORG", "TDGYO", "TEKTU", "TERA", "TETMT", "TEZOL", "TGSAS", "TKFEN", "TKNSA",
-    "TLMAN", "TMPOL", "TMSN", "TRCAS", "TRGYO", "TRILC", "TSGYO", "TSKB", "TSPOR",
-    "TTKOM", "TTRAK", "TUCLK", "TUKAS", "TUREX", "TURGG", "TURSG", "UFUK", "ULAS",
-    "ULKER", "ULUFA", "ULUSE", "ULUUN", "UMPAS", "UNLU", "USAK", "UZERB", "VAKBN",
-    "VAKFN", "VAKKO", "VANGD", "VBTYZ", "VERTU", "VERUS", "VESBE", "VESTL", "VKFYO",
-    "VKGYO", "VKING", "VRGYO", "YAPRK", "YATAS", "YAYLA", "YBTAS", "YEOTK", "YESIL",
-    "YGGYO", "YGYO", "YKBNK", "YKSLN", "YONGA", "YUNSA", "YYAPI", "ZEDUR", "ZOREN",
-    "ZRGYO",
-]
-
-PROCESSED_KAP_LINKS = set()
-SCANNED_TIMES_TODAY = set()
-
-# ============================================================
-# YARDIMCI
-# ============================================================
-def send_telegram_msg(message: str):
+# ===================== TELEGRAM =====================
+def send_telegram(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
-        print(f"\n[TELEGRAM]:\n{message}\n")
-        return
+        print(f"\n[TELEGRAM MOCK]\n{message}\n")
+        return True
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -195,537 +107,118 @@ def send_telegram_msg(message: str):
         "disable_web_page_preview": True,
     }
     try:
-        requests.post(url, json=payload, timeout=12)
+        r = requests.post(url, json=payload, timeout=12)
+        return r.status_code == 200
     except Exception as e:
         logger.warning(f"Telegram hata: {e}")
+        return False
 
-
-def format_compact_volume(v):
-    try:
-        v = float(v)
-        if v >= 1_000_000:
-            return f"{v/1_000_000:.1f}M"
-        if v >= 1_000:
-            return f"{v/1_000:.0f}K"
-        return str(int(v))
-    except Exception:
-        return "0"
-
-
-def get_all_bist_tickers():
-    try:
-        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            data = res.json().get("d", [])
-            fetched = {
-                item.get("code")
-                for item in data
-                if item.get("code") and len(item.get("code", "")) <= 5
-            }
-            filtered = sorted(list(fetched))
-            if len(filtered) >= 300:
-                logger.info(f"Canlı liste: {len(filtered)} hisse")
-                return filtered
-    except Exception as e:
-        logger.warning(f"Canlı liste alınamadı: {e}")
-    return sorted(list(set(FULL_BIST_LIST) | BIST_30_SET))
-
-
-def is_trading_time() -> bool:
-    """Hafta içi + resmi tatil hariç + 09:00-18:00"""
-    now = datetime.now(TZ)
-    today_str = now.strftime("%Y-%m-%d")
+# ===================== İŞLEM SAATİ =====================
+def is_trading_time(now: datetime = None) -> bool:
+    if now is None:
+        now = datetime.now(TZ)
+    today = now.strftime("%Y-%m-%d")
     weekday = now.weekday()
-    current_time = now.strftime("%H:%M")
-
+    current = now.strftime("%H:%M")
     if weekday >= 5:
         return False
-    if today_str in HOLIDAYS_2026:
+    if today in HOLIDAYS_FULL:
         return False
-    if today_str in HALF_DAY_HOLIDAYS_2026:
-        return "09:00" <= current_time < "13:00"
-    return "09:00" <= current_time <= "18:00"
+    if today in HALF_DAY_HOLIDAYS:
+        return TRADING_START <= current < "13:00"
+    return TRADING_START <= current <= TRADING_END
 
+def is_scan_time(now: datetime = None) -> bool:
+    if now is None:
+        now = datetime.now(TZ)
+    return now.strftime("%H:%M") in SCAN_TIMES
 
-# ============================================================
-# KAP
-# ============================================================
-def check_kap_news():
-    global PROCESSED_KAP_LINKS
+# ===================== VERİ & STRATEJİ =====================
+FULL_BIST_LIST = [
+    "A1CAP","AAVTUR","ACSEL","ADEL","ADESE","AEFES","AFYON","AGESA","AGHOL","AGROT",
+    "AHGAZ","AKCNS","AKENR","AKFGY","AKFYE","AKGRT","AKMGY","AKSA","AKSEN","AKSGY",
+    "ALBRK","ALCAR","ALCTL","ALFAS","ALGYO","ALKA","ALKIM","ALMAD","ALTNY","ALVES",
+    "ANELE","ANGEN","ANHYT","ANSGR","ARASE","ARCLK","ARDYZ","ARENA","ARSAN","ARTMS",
+    "ARZUM","ASGYO","ASUZU","ATAGY","ATAKP","ATATP","ATEKS","ATLAS","ATSYH","AVGYO",
+    "AVHOL","AVOD","AVPGY","AYCES","AYDEM","AYEN","AYES","AYGAZ","AZTEK","BAGFS",
+    "BAKAB","BALAT","BANVT","BARMA","BASGZ","BAYRK","BEAYO","BEYAZ","BFREN","BIENY",
+    "BIGCH","BINHO","BIOEN","BIZIM","BJKAS","BLCYT","BMSCH","BMSTL","BNTAS","BOBET",
+    "BORLS","BORSK","BOSSA","BRISA","BRKO","BRKSN","BRKVY","BRLSM","BRMEN","BRYAT",
+    "BSOKE","BTCIM","BUCIM","BURCE","BURVA","BVSAN","BYDNR","CANTE","CASA","CATES",
+    "CCOLA","CELHA","CEMAS","CEMTS","CEOEM","CIMSA","CLEBI","CMBTN","CMENT","CONSE",
+    "COSMO","CRDFA","CRFSA","CUSAN","CVKMD","CWENE","DAGHL","DAGI","DAPGM","DARDL",
+    "DATA","DEFVA","DERHL","DERIM","DESA","DESPC","DEVA","DGNMO","DIRIT","DITAS",
+    "DMRGD","DMSAS","DOBUR","DOCO","DOFER","DOGUB","DOHOL","DOKTA","DURDO","DYOBY",
+    "DZGYO","EBEBK","ECILC","ECZYT","EDATA","EDIP","EGEEN","EGEPO","EGERT","EGPRO",
+    "EGSER","EKIZ","EKOS","EKSUN","ELITE","EMKEL","ENERY","ENJSA","ENTRA","EPLAS",
+    "ERBOS","ERCAN","ERSU","ESCAR","ESCOM","ESEN","ETILR","ETYAT","EUHOL","EUREN",
+    "EUYO","EYGYO","FADE","FENER","FLAP","FMIZP","FONET","FORMT","FORTE","FRIGO",
+    "FSYGM","FZLGY","GARFA","GENTS","GEREL","GESAN","GIPTA","GLBMD","GLCVY","GLRYH",
+    "GLYHO","GMTAS","GOKNR","GOLTS","GOODY","GOZDE","GRNYO","GRSEL","GRTRK","GSDDE",
+    "GSDHO","GSRAY","GWIND","GZNMI","HALKB","HATEK","HATSN","HDFGS","HEDEF","HKTM",
+    "HLGYO","HRZNO","HSCSM","HUBVC","HUNER","HURGZ","ICBCT","ICUGS","IDGYO","IEYHO",
+    "IHAAS","IHEVA","IHGZT","IHLAS","IHLGM","IHYAY","IMASM","INDES","INFO","INGRM",
+    "INTEM","INVEO","INVES","IPEKE","ISATR","ISBIR","ISBTR","ISDMR","ISFIN","ISGSY",
+    "ISGYO","ISKPL","ISKUR","ISMEN","ISSEN","ISYAT","ITTFH","IZENR","IZFAS","IZINV",
+    "IZMDC","JANTS","KALES","KALEK","KARSN","KARTN","KARYE","KATMR","KCAER","KENT",
+    "KERVN","KERVT","KFEIN","KGYO","KIMMR","KLGYO","KLKIM","KLMSN","KLNMA","KLRHO",
+    "KLSYN","KMPUR","KNFRT","KOCMT","KONKA","KONYA","KOPOL","KORDS","KOZAA","KRDMA",
+    "KRDMB","KRGYO","KRONT","KRPLS","KRSTL","KRTEK","KRVGD","KSTUR","KTLEV","KTSKR",
+    "KUTPO","KUVVA","KUYAS","KZBGY","KZGYO","LIDER","LIDFA","LINK","LKMNH","LOGO",
+    "LRSHO","LUKSK","MAALT","MACKO","MACRO","MAGEN","MAKIM","MAKTK","MANAS","MARKA",
+    "MARTI","MAVI","MAXOT","MEDTR","MEGAP","MEKAG","MEPET","MERCN","MERIT","MERKO",
+    "METRO","METUR","MGROS","MHRGY","MIATK","MIPAZ","MMCAS","MNDRS","MNDTR","MOBTL",
+    "MOGAN","MPARK","MRGYO","MRSHL","MSGYO","MTRKS","MTRYO","MUHAL","MUREN","NASHQ",
+    "NATEN","NETAS","NIBAS","NTGAZ","NTHOL","NUGYO","NUHCM","OBASE","OBAMS","ODINE",
+    "OFSYM","ONCSM","ORCAY","ORGE","ORMA","OSMEN","OSTIM","OTKAR","OTTO","OYAYO",
+    "OYLUM","OYYAT","OZGYO","OZKGY","OZRDN","OZSUB","PAGYO","PAMEL","PAPIL","PARSN",
+    "PASEU","PATEK","PCILT","PEGYO","PEKGY","PENGD","PENTA","PETUN","PINSU","PKART",
+    "PKENT","PLTUR","PNLSN","PNSUT","POLHO","POLTK","PRDGS","PRKAB","PRKME","PRZMA",
+    "PSDTC","PSGYO","QNBFL","QUAGR","RALYH","RAYSG","REEDR","RNPOL","RODRG","ROYAL",
+    "RTALB","RUBNS","RYGYO","RYSAS","SAMAT","SANEL","SANFM","SANKO","SARKY","SAYAS",
+    "SDTTR","SEGYO","SEKFK","SEKUR","SELEC","SELGD","SELVA","SEYKM","SILVR","SKBNK",
+    "SKTAS","SMART","SMRTG","SNGYO","SNICA","SNKRN","SNPAM","SNTCD","SOKE","SOKM",
+    "SONME","SRVGY","SUMAS","SUNTK","SURGY","SUWEN","TABGD","TARKM","TATEN","TATGD",
+    "TAVHL","TBORG","TDGYO","TEKTU","TERA","TETMT","TEZOL","TGSAS","TKFEN","TKNSA",
+    "TLMAN","TMPOL","TMSN","TRCAS","TRGYO","TRILC","TSGYO","TSKB","TSPOR","TTKOM",
+    "TTRAK","TUCLK","TUKAS","TUREX","TURGG","TURSG","UFUK","ULAS","ULKER","ULUFA",
+    "ULUSE","ULUUN","UMPAS","UNLU","USAK","UZERB","VAKBN","VAKFN","VAKKO","VANGD",
+    "VBTYZ","VERTU","VERUS","VESBE","VESTL","VKFYO","VKGYO","VKING","VRGYO","YAPRK",
+    "YATAS","YAYLA","YBTAS","YEOTK","YESIL","YGGYO","YGYO","YKBNK","YKSLN","YONGA",
+    "YUNSA","YYAPI","ZEDUR","ZOREN","ZRGYO",
+    "AKBNK","ALARK","ASELS","ASTOR","BIMAS","BRSAN","DOAS","EKGYO","ENKAI","EREGL",
+    "FROTO","GARAN","GUBRF","HEKTS","ISCTR","KCHOL","KONTR","KOZAL","KRDMD","ODAS",
+    "OYAKC","PETKM","PGSUS","SAHOL","SASA","SISE","TCELL","THYAO","TOASO","TUPRS",
+]
+def get_all_tickers() -> List[str]:
     try:
-        feed = feedparser.parse("https://www.kap.org.tr/tr/rss")
-        for entry in feed.entries[:25]:
-            if entry.link in PROCESSED_KAP_LINKS:
-                continue
-            title = entry.title or ""
-            summary = getattr(entry, "summary", "") or ""
-            content_lower = (title + " " + summary).lower()
-            for key, (stars, category) in KAP_STAR_MAP.items():
-                if key in content_lower:
-                    PROCESSED_KAP_LINKS.add(entry.link)
-                    send_telegram_msg(
-                        f"🔥 <b>[YÜKSEK HABER DEĞERİ]</b>\n"
-                        f"<b>Etki:</b> {stars}\n"
-                        f"<b>Başlık:</b> {title}\n"
-                        f"<b>Link:</b> <a href='{entry.link}'>KAP Detayı</a>"
-                    )
-                    time.sleep(0.4)
-                    break
+        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTeknikVeriler"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        if res.status_code == 200:
+            data = res.json().get("d", [])
+            fetched = {item.get("code") for item in data if item.get("code") and len(item.get("code","")) <= 5}
+            if len(fetched) >= 300:
+                logger.info(f"Canlı liste: {len(fetched)} hisse")
+                return sorted(list(fetched))
     except Exception as e:
-        logger.debug(f"KAP RSS: {e}")
+        logger.warning(f"Canlı liste alınamadı: {e}")
+    return sorted(list(set(FULL_BIST_LIST)))
 
-
-def get_kap_news_api(symbol: str):
-    onemli = [
-        "yeni iş ilişkisi", "ihale", "finansal rapor", "bilanço", "kar payı",
-        "sermaye artırımı", "pay alım", "birleşme", "bedelsiz",
-    ]
-    try:
-        url = f"https://www.kap.org.tr/tr/api/disclosures?code={symbol}"
-        response = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
-        if response.status_code == 200:
-            data = response.json()
-            if data and isinstance(data, list) and len(data) > 0:
-                son = data[0]
-                baslik = son.get("title", "Özel Durum Açıklaması")
-                ozet = son.get("summary") or baslik
-                full_text = f"{baslik} {ozet}".lower()
-                is_important = any(k in full_text for k in onemli)
-                return f"{baslik}: {ozet[:55]}...", is_important
-    except Exception:
-        pass
-    return "Aktif bildirim yok", False
-
-
-# ============================================================
-# GECE ADAYLARI
-# ============================================================
-def load_night_candidates():
-    try:
-        if NIGHT_CANDIDATES_FILE.exists():
-            with open(NIGHT_CANDIDATES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception as e:
-        logger.warning(f"night_candidates okunamadı: {e}")
-    return {}
-
-
-def save_night_candidates(candidates: dict):
-    try:
-        payload = {
-            "date": datetime.now(TZ).strftime("%Y-%m-%d"),
-            "saved_at": datetime.now(TZ).isoformat(),
-            "items": candidates,
-        }
-        with open(NIGHT_CANDIDATES_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        logger.info(f"Gece adayları kaydedildi: {len(candidates)} hisse")
-    except Exception as e:
-        logger.error(f"night_candidates yazılamadı: {e}")
-
-
-def fetch_close_snapshot(symbol: str):
+def fetch_ohlcv(symbol: str, period: str = "6mo", interval: str = "1d") -> Optional[pd.DataFrame]:
     try:
         t = yf.Ticker(f"{symbol}.IS")
-        df = t.history(period="1mo", interval="1d", auto_adjust=True)
-        if df is None or len(df) < 12:
+        df = t.history(period=period, interval=interval, auto_adjust=True)
+        if df is None or df.empty or len(df) < 30:
             return None
-
-        close = float(df["Close"].iloc[-1])
-        vol = float(df["Volume"].iloc[-1])
-        hacim_tl = vol * close
-        avg10 = float(df["Volume"].iloc[-11:-1].mean())
-        rvol = (vol / avg10) if avg10 > 0 else 0.0
-
-        atr = df.ta.atr(length=14)
-        atr_val = float(atr.iloc[-1]) if atr is not None and not atr.empty else close * 0.02
-        sl = max(0.01, close - 1.5 * atr_val)
-        tp = close + 3.0 * atr_val
-
-        return {
-            "fiyat": round(close, 2),
-            "hacim_tl": format_compact_volume(hacim_tl),
-            "rvol": round(rvol, 2),
-            "sl": round(sl, 2),
-            "tp": round(tp, 2),
-        }
-    except Exception as e:
-        logger.debug(f"snapshot {symbol}: {e}")
-        return None
-
-
-def send_previous_night_performance_report():
-    data = load_night_candidates()
-    items = data.get("items") or {}
-    source_date = data.get("date", "?")
-    today = datetime.now(TZ).strftime("%Y-%m-%d")
-
-    if not items:
-        send_telegram_msg(
-            "📋 <b>DÜN GECE TAVAN ADAYLARI — PERFORMANS</b>\n"
-            "Önceki geceden kayıtlı aday yok."
-        )
-        return
-
-    if source_date == today:
-        logger.info("Gece adayları bugüne ait; performans yarın raporlanacak.")
-        return
-
-    logger.info(f"Dün gece ({source_date}) adayları raporlanıyor: {len(items)}")
-    rows = []
-
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futures = {ex.submit(fetch_close_snapshot, s): s for s in items.keys()}
-        for fut in as_completed(futures):
-            sym = futures[fut]
-            snap = fut.result()
-            entry = items[sym]
-            entry_price = float(entry.get("fiyat", 0))
-            if not snap or entry_price <= 0:
-                continue
-            pct = ((snap["fiyat"] - entry_price) / entry_price) * 100
-            rows.append({
-                "symbol": sym,
-                "entry": entry_price,
-                "fiyat": snap["fiyat"],
-                "pct": round(pct, 2),
-                "hacim_tl": snap["hacim_tl"],
-                "rvol": snap["rvol"],
-                "sl": snap["sl"],
-                "tp": snap["tp"],
-                "night_sl": entry.get("sl"),
-                "night_tp": entry.get("tp"),
-            })
-
-    if not rows:
-        send_telegram_msg(
-            f"📋 <b>DÜN GECE TAVAN ADAYLARI — PERFORMANS</b>\n"
-            f"📅 Kaynak: {source_date}\nGüncel fiyat alınamadı."
-        )
-        return
-
-    rows.sort(key=lambda x: x["pct"], reverse=True)
-    tarih = datetime.now(TZ).strftime("%d.%m.%Y - %H:%M")
-
-    msg = (
-        f"📋 <b>DÜN GECE TAVAN ADAYLARI — GÜN SONU PERFORMANS</b>\n"
-        f"📅 Rapor: <i>{tarih}</i>\n"
-        f"📌 Kaynak gece: <b>{source_date} 23:00</b>\n"
-        f"🔢 Adet: <b>{len(rows)}</b>\n"
-        f"───────────────────\n\n"
-    )
-
-    for r in rows:
-        emoji = "🟢" if r["pct"] >= 0 else "🔴"
-        msg += (
-            f"{emoji} <b>#{r['symbol']}</b>\n"
-            f"├ Dün gece: <b>{r['entry']} TL</b> → Bugün: <b>{r['fiyat']} TL</b>\n"
-            f"├ <b>Getiri: %{r['pct']:+.2f}</b>\n"
-            f"├ Hacim: {r['hacim_tl']} TL | RVOL: {r['rvol']}x\n"
-            f"├ 🛑 SL: {r['sl']} | 🎯 TP: {r['tp']}\n"
-        )
-        if r.get("night_sl") and r.get("night_tp"):
-            msg += f"└ (Dün gece SL/TP: {r['night_sl']} / {r['night_tp']})\n\n"
-        else:
-            msg += "\n"
-
-        if len(msg) > 3500:
-            send_telegram_msg(msg)
-            msg = ""
-            time.sleep(1)
-
-    if msg.strip():
-        send_telegram_msg(msg)
-
-    poz = sum(1 for r in rows if r["pct"] > 0)
-    neg = sum(1 for r in rows if r["pct"] < 0)
-    ort = sum(r["pct"] for r in rows) / len(rows)
-    send_telegram_msg(
-        f"📊 <b>Özet ({source_date} → bugün)</b>\n"
-        f"• Yeşil: {poz} | Kırmızı: {neg}\n"
-        f"• Ortalama getiri: <b>%{ort:+.2f}</b>"
-    )
-
-
-def send_night_summary_table(ana_liste, yuzde5_liste, hacim_liste):
-    merged = {}
-    for lst in (ana_liste, yuzde5_liste, hacim_liste):
-        for it in lst:
-            sym = it["symbol"]
-            if sym not in merged or it["change_pct"] > merged[sym]["change_pct"]:
-                merged[sym] = it
-
-    if not merged:
-        send_telegram_msg("📋 <b>23:00 ÖZET TABLO</b>\nListelenecek hisse yok.")
-        return
-
-    rows = sorted(merged.values(), key=lambda x: x["change_pct"], reverse=True)
-    tarih = datetime.now(TZ).strftime("%d.%m.%Y - %H:%M")
-
-    msg = (
-        f"📋 <b>23:00 GECE BÜLTENİ — ÖZET LİSTE</b>\n"
-        f"📅 <i>{tarih}</i>\n"
-        f"───────────────────\n"
-        f"<pre>"
-        f"{'Hisse':<8} {'Fiyat':>8} {'Günlük %':>9} {'Hacim':>10}\n"
-        f"{'-'*8} {'-'*8} {'-'*9} {'-'*10}\n"
-    )
-    for it in rows:
-        msg += (
-            f"{it['symbol']:<8} "
-            f"{it['fiyat']:>7.2f} "
-            f"%{it['change_pct']:>+7.2f} "
-            f"{it['hacim_tl']:>10}\n"
-        )
-        if len(msg) > 3500:
-            msg += "</pre>"
-            send_telegram_msg(msg)
-            msg = "<pre>"
-            time.sleep(0.8)
-    msg += "</pre>"
-    send_telegram_msg(msg)
-
-
-# ============================================================
-# SANAL PORTFÖY
-# ============================================================
-def load_portfolio():
-    try:
-        if PORTFOLIO_FILE.exists():
-            with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception as e:
-        logger.warning(f"portfolio okunamadı: {e}")
-    return {
-        "capital": INITIAL_CAPITAL,
-        "cash": INITIAL_CAPITAL,
-        "positions": {},
-        "closed": [],
-        "last_update": None
-    }
-
-
-def save_portfolio(portfolio: dict):
-    try:
-        portfolio["last_update"] = datetime.now(TZ).isoformat()
-        with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
-            json.dump(portfolio, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"portfolio yazılamadı: {e}")
-
-
-def get_current_price(symbol: str):
-    try:
-        t = yf.Ticker(f"{symbol}.IS")
-        df = t.history(period="5d", interval="1d", auto_adjust=True)
-        if df is None or df.empty:
-            return None
-        return float(df["Close"].iloc[-1])
+        return df
     except Exception:
         return None
 
-
-def open_positions_from_ana_liste(ana_liste: list):
-    """Sadece işlem saatlerinde ve Ana stratejiden alım yapar."""
-    if not is_trading_time():
-        logger.info("İşlem saatleri dışında, yeni pozisyon açılmıyor.")
-        return
-
-    if not ana_liste:
-        return
-
-    portfolio = load_portfolio()
-    open_count = len(portfolio["positions"])
-
-    if open_count >= MAX_POSITIONS:
-        logger.info("Maksimum pozisyon sayısına ulaşıldı.")
-        return
-
-    available = [item for item in ana_liste if item["symbol"] not in portfolio["positions"]]
-    if not available:
-        return
-
-    remaining_slots = MAX_POSITIONS - open_count
-    to_buy = available[:remaining_slots]
-
-    cash = portfolio["cash"]
-    if cash < 500:
-        logger.info("Nakit yetersiz.")
-        return
-
-    per_position = cash / len(to_buy)
-
-    for item in to_buy:
-        symbol = item["symbol"]
-        price = item["fiyat"]
-        if price <= 0:
-            continue
-
-        qty = int(per_position // price)
-        if qty < 1:
-            continue
-
-        cost = qty * price
-        if cost > cash:
-            continue
-
-        sl = item["sl"]
-        tp = item["tp"]
-
-        portfolio["positions"][symbol] = {
-            "entry": price,
-            "qty": qty,
-            "sl": sl,
-            "tp": tp,
-            "original_sl": sl,
-            "cost": round(cost, 2),
-            "entry_date": datetime.now(TZ).strftime("%Y-%m-%d"),
-            "strategy": "DİP+BB+DüşükPD/DD",
-            "breakeven_moved": False
-        }
-        cash -= cost
-        logger.info(f"ALIM → {symbol} | {qty} adet @ {price} | SL:{sl} TP:{tp}")
-
-    portfolio["cash"] = round(cash, 2)
-    save_portfolio(portfolio)
-
-    if portfolio["positions"]:
-        msg = "💰 <b>SANAL CÜZDAN — YENİ POZİSYONLAR</b>\n"
-        msg += f"📅 {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}\n"
-        msg += f"💵 Kalan Nakit: <b>{portfolio['cash']:,.2f} ₺</b>\n\n"
-        for sym, pos in portfolio["positions"].items():
-            msg += (
-                f"🔹 <b>#{sym}</b>\n"
-                f"├ Giriş: {pos['entry']} ₺ × {pos['qty']}\n"
-                f"├ 🛑 SL: {pos['sl']} | 🎯 TP: {pos['tp']}\n"
-                f"└ Maliyet: {pos['cost']:,.2f} ₺\n\n"
-            )
-        send_telegram_msg(msg)
-
-
-def update_portfolio():
-    """TP/SL + zarar etmeme + yüksek hacim/momentum kontrolü"""
-    portfolio = load_portfolio()
-    if not portfolio["positions"]:
-        return
-
-    closed_this_round = []
-    positions = portfolio["positions"].copy()
-
-    for symbol, pos in positions.items():
-        try:
-            t = yf.Ticker(f"{symbol}.IS")
-            df = t.history(period="10d", interval="1d", auto_adjust=True)
-            if df is None or len(df) < 5:
-                continue
-
-            current = float(df["Close"].iloc[-1])
-            prev_close = float(df["Close"].iloc[-2])
-            today_change_pct = ((current - prev_close) / prev_close) * 100
-
-            last_vol = float(df["Volume"].iloc[-1])
-            avg_vol_5 = float(df["Volume"].iloc[-6:-1].mean())
-            rvol = last_vol / avg_vol_5 if avg_vol_5 > 0 else 0
-
-            last_3_closes = df["Close"].iloc[-3:].values
-            is_rising = all(last_3_closes[i] <= last_3_closes[i+1] for i in range(len(last_3_closes)-1))
-            strong_momentum = (
-                rvol >= 2.0 and
-                today_change_pct > 0 and
-                is_rising and
-                current > pos["entry"]
-            )
-        except Exception:
-            current = get_current_price(symbol)
-            if current is None:
-                continue
-            today_change_pct = 0
-            rvol = 0
-            strong_momentum = False
-
-        entry = pos["entry"]
-        qty = pos["qty"]
-        pnl_pct = ((current - entry) / entry) * 100
-
-        # Zarar etmeme: %2+ kâr → SL girişe
-        if not pos.get("breakeven_moved") and pnl_pct >= BREAKEVEN_TRIGGER_PCT:
-            pos["sl"] = entry
-            pos["breakeven_moved"] = True
-            logger.info(f"{symbol} → SL girişe çekildi (breakeven)")
-
-        # Yüksek hacim + yükseliş devam → SATMA
-        if strong_momentum:
-            logger.info(f"{symbol} → Yüksek hacim + yükseliş devam, satılmıyor (RVOL:{rvol:.2f})")
-            portfolio["positions"][symbol] = pos
-            continue
-
-        # Take Profit
-        if current >= pos["tp"]:
-            profit = (current - entry) * qty
-            portfolio["cash"] += current * qty
-            closed_this_round.append({
-                "symbol": symbol,
-                "reason": "TP",
-                "entry": entry,
-                "exit": current,
-                "pnl": round(profit, 2),
-                "pnl_pct": round(pnl_pct, 2),
-                "qty": qty
-            })
-            del portfolio["positions"][symbol]
-            continue
-
-        # Stop Loss
-        if current <= pos["sl"]:
-            pnl = (current - entry) * qty
-            portfolio["cash"] += current * qty
-            closed_this_round.append({
-                "symbol": symbol,
-                "reason": "SL" if not pos.get("breakeven_moved") else "BREAKEVEN",
-                "entry": entry,
-                "exit": current,
-                "pnl": round(pnl, 2),
-                "pnl_pct": round(pnl_pct, 2),
-                "qty": qty
-            })
-            del portfolio["positions"][symbol]
-            continue
-
-        portfolio["positions"][symbol] = pos
-
-    if closed_this_round:
-        portfolio.setdefault("closed", []).extend(closed_this_round)
-
-        msg = "🔔 <b>SANAL CÜZDAN — POZİSYON KAPANDI</b>\n\n"
-        for c in closed_this_round:
-            emoji = "🟢" if c["pnl"] >= 0 else "🔴"
-            msg += (
-                f"{emoji} <b>#{c['symbol']}</b> → {c['reason']}\n"
-                f"├ Giriş: {c['entry']} → Çıkış: {c['exit']}\n"
-                f"├ Adet: {c['qty']}\n"
-                f"└ PnL: <b>{c['pnl']:+.2f} ₺ (%{c['pnl_pct']:+.2f})</b>\n\n"
-            )
-        msg += f"💵 Güncel Nakit: <b>{portfolio['cash']:,.2f} ₺</b>"
-        send_telegram_msg(msg)
-
-    portfolio["cash"] = round(portfolio["cash"], 2)
-    save_portfolio(portfolio)
-
-
-# ============================================================
-# ANALİZ
-# ============================================================
-def analyze_ticker(symbol: str):
+def analyze_symbol(symbol: str) -> Optional[Dict[str, Any]]:
     try:
-        ticker = yf.Ticker(f"{symbol}.IS")
-        df_daily = ticker.history(period="6mo", interval="1d", auto_adjust=True)
-        df_weekly = ticker.history(period="1y", interval="1wk", auto_adjust=True)
-
-        if df_daily is None or len(df_daily) < 35:
-            return None
-        if df_weekly is None or len(df_weekly) < 15:
+        df_daily = fetch_ohlcv(symbol, "6mo", "1d")
+        df_weekly = fetch_ohlcv(symbol, "1y", "1wk")
+        if df_daily is None or df_weekly is None or len(df_daily) < 40:
             return None
 
         last_close = float(df_daily["Close"].iloc[-1])
@@ -740,23 +233,15 @@ def analyze_ticker(symbol: str):
         avg_vol_10 = df_daily["Volume"].iloc[-11:-1].mean()
         rvol = last_volume / avg_vol_10 if avg_vol_10 > 0 else 0
 
-        rsi_daily = df_daily.ta.rsi(length=14)
-        rsi_weekly = df_weekly.ta.rsi(length=14)
-        if rsi_daily is None or rsi_weekly is None:
-            return None
-        rsi_d = float(rsi_daily.iloc[-1])
-        rsi_w = float(rsi_weekly.iloc[-1])
+        rsi_d = float(df_daily.ta.rsi(length=14).iloc[-1])
+        rsi_w = float(df_weekly.ta.rsi(length=14).iloc[-1])
 
         stoch = df_daily.ta.stoch(k=14, d=3, smooth_k=3)
         if stoch is None or stoch.empty:
             return None
         k_col = next((c for c in stoch.columns if "STOCHk" in c), None)
-        d_col = next((c for c in stoch.columns if "STOCHd" in c), None)
-        if not k_col or not d_col:
-            return None
         stoch_k = float(stoch[k_col].iloc[-1])
-        stoch_d = float(stoch[d_col].iloc[-1])
-        stoch_alimda = (stoch_k < 20) or (stoch_k > stoch_d and stoch_k < 35)
+        stoch_alimda = stoch_k < 20 or stoch_k < 35
 
         bb = df_daily.ta.bbands(length=20, std=2)
         bb_destek = False
@@ -766,64 +251,43 @@ def analyze_ticker(symbol: str):
                 bb_lower = float(bb[lower_col].iloc[-1])
                 bb_destek = last_close <= (bb_lower * 1.03) and last_close >= (bb_lower * 0.97)
 
-        atr = df_daily.ta.atr(length=14)
-        if atr is None:
-            return None
-        atr_val = float(atr.iloc[-1])
-        stop_loss = max(0.01, last_close - (1.5 * atr_val))
-        take_profit = last_close + (3.0 * atr_val)
+        atr_val = float(df_daily.ta.atr(length=14).iloc[-1])
+        stop_loss = max(0.01, last_close - 1.5 * atr_val)
+        take_profit = last_close + 3.0 * atr_val
 
-        pb_ratio = None
-        try:
-            info = ticker.info
-            pb_ratio = info.get("priceToBook") or info.get("priceToBookRatio")
-            if pb_ratio:
-                pb_ratio = float(pb_ratio)
-        except Exception:
-            pass
+        ema20 = df_daily.ta.ema(length=20)
+        ema50 = df_daily.ta.ema(length=50)
+        above_ema20 = last_close > float(ema20.iloc[-1]) if ema20 is not None else False
+        above_ema50 = last_close > float(ema50.iloc[-1]) if ema50 is not None else False
 
-        close_5d_ago = float(df_daily["Close"].iloc[-6]) if len(df_daily) >= 6 else last_close
-        change_5d = ((last_close - close_5d_ago) / close_5d_ago) * 100
-        asiri_zarar_yok = change_5d > -12
-
-        avg_vol_20 = df_daily["Volume"].iloc[-20:].mean()
-        tahta_durumu = "⚠️ Sığ Tahta" if avg_vol_20 < 400_000 else "🟢 Likit Tahta"
-
-        kap_ozeti, kap_onemli = get_kap_news_api(symbol)
-
-        strateji_a = (
-            rsi_d < 30 and rsi_w < 32 and stoch_alimda
-            and hacim_tl >= 20_000_000 and rvol >= 1.0 and change_pct > 0
+        # STRATEJİLER
+        strateji_dip = (
+            rsi_d < RSI_DAILY_MAX and rsi_w < RSI_WEEKLY_MAX and stoch_alimda
+            and hacim_tl >= MIN_VOLUME_TL_DIP and rvol >= MIN_RVOL and change_pct > 0
         )
-        strateji_b = (
-            bb_destek and (pb_ratio is not None and pb_ratio < 1.5)
-            and rvol_5 >= 1.2 and asiri_zarar_yok
-            and hacim_tl >= 8_000_000 and change_pct > -1
+        strateji_bb = (
+            bb_destek and rvol_5 >= 1.2 and hacim_tl >= BB_VOLUME_MIN and change_pct > -1
         )
-        yuzde_5_ustu = change_pct >= 5.0 and hacim_tl >= 5_000_000
-        hacim_patlamasi = hacim_tl >= 20_000_000 and rvol >= 1.0
+        strateji_breakout = (
+            rvol >= BREAKOUT_RVOL_MIN and hacim_tl >= BREAKOUT_VOLUME_MIN
+            and change_pct >= 3.0 and above_ema20 and above_ema50
+        )
+        strateji_momentum = (
+            change_pct >= 5.0 and rvol >= 2.0 and hacim_tl >= 25_000_000
+            and 50 < rsi_d < 75
+        )
 
-        if not (strateji_a or strateji_b or yuzde_5_ustu or hacim_patlamasi):
+        if not (strateji_dip or strateji_bb or strateji_breakout or strateji_momentum):
             return None
 
-        yildiz = 3
-        if rvol >= 2.0 or rvol_5 >= 2.0:
-            yildiz += 1
-        if bb_destek:
-            yildiz += 1
-        if kap_onemli:
-            yildiz += 1
-        if pb_ratio and pb_ratio < 1.0:
-            yildiz += 1
-        yildizlar = "⭐" * min(yildiz, 5)
-
-        ema9 = df_daily.ta.ema(length=9)
-        trend_kirilimi = False
-        if ema9 is not None:
-            trend_kirilimi = (
-                last_close > float(ema9.iloc[-1])
-                and prev_close <= float(ema9.iloc[-2])
-            )
+        if strateji_dip:
+            primary = "DIP"
+        elif strateji_bb:
+            primary = "BB"
+        elif strateji_breakout:
+            primary = "BREAKOUT"
+        else:
+            primary = "MOMENTUM"
 
         return {
             "symbol": symbol,
@@ -832,208 +296,291 @@ def analyze_ticker(symbol: str):
             "rsi_d": round(rsi_d, 1),
             "stoch_k": round(stoch_k, 1),
             "rvol": round(rvol, 2),
-            "rvol_5": round(rvol_5, 2),
-            "hacim_tl": format_compact_volume(hacim_tl),
-            "hacim_tl_raw": hacim_tl,
-            "tahta_durumu": tahta_durumu,
+            "hacim_tl": round(hacim_tl, 0),
             "sl": round(stop_loss, 2),
             "tp": round(take_profit, 2),
-            "kap_ozeti": kap_ozeti,
-            "kap_onemli": kap_onemli,
-            "trend_kirilimi": trend_kirilimi,
-            "yildizlar": yildizlar,
-            "pb_ratio": round(pb_ratio, 2) if pb_ratio else None,
-            "strateji_a": strateji_a,
-            "strateji_b": strateji_b,
-            "yuzde_5_ustu": yuzde_5_ustu,
-            "hacim_patlamasi": hacim_patlamasi,
+            "strateji_dip": strateji_dip,
+            "strateji_bb": strateji_bb,
+            "strateji_breakout": strateji_breakout,
+            "strateji_momentum": strateji_momentum,
+            "primary_strategy": primary,
         }
     except Exception as e:
-        logger.debug(f"{symbol} hata: {e}")
+        logger.debug(f"{symbol}: {e}")
         return None
 
-
-# ============================================================
-# TARAMA
-# ============================================================
-def scan_bist_stocks(symbol_list, scan_time: str):
-    now_str = datetime.now(TZ).strftime("%H:%M:%S")
-    logger.info(f"[{now_str}] Tarama → {scan_time} | {len(symbol_list)} hisse")
-
-    ana_liste = []
-    yuzde5_liste = []
-    hacim_liste = []
-
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        futures = {executor.submit(analyze_ticker, sym): sym for sym in symbol_list}
-        for future in as_completed(futures):
-            res = future.result()
+def scan_symbols(symbols: List[str], max_workers: int = 6) -> List[Dict]:
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(analyze_symbol, s): s for s in symbols}
+        for fut in as_completed(futures):
+            res = fut.result()
             if res:
-                if res["strateji_a"] or res["strateji_b"]:
-                    ana_liste.append(res)
-                if res["yuzde_5_ustu"]:
-                    yuzde5_liste.append(res)
-                if res["hacim_patlamasi"]:
-                    hacim_liste.append(res)
+                results.append(res)
+    priority = {"DIP": 4, "BB": 3, "BREAKOUT": 2, "MOMENTUM": 1}
+    results.sort(key=lambda x: (priority.get(x["primary_strategy"], 0), x["rvol"]), reverse=True)
+    return results
+    priority = {"DIP": 4, "BB": 3, "BREAKOUT": 2, "MOMENTUM": 1}
+    results.sort(key=lambda x: (priority.get(x["primary_strategy"], 0), x["rvol"]), reverse=True)
+    return results
 
-    ana_liste.sort(key=lambda x: (x["kap_onemli"], x["rvol"]), reverse=True)
-    yuzde5_liste.sort(key=lambda x: x["change_pct"], reverse=True)
-    hacim_liste.sort(key=lambda x: x["hacim_tl_raw"], reverse=True)
+# ===================== PORTFÖY (SQLite) =====================
+class PortfolioManager:
+    def __init__(self):
+        self.db_path = DB_PATH
+        self._init_db()
 
-    baslik_ek = "🌙 GECE BÜLTENİ" if scan_time == "23:00" else "GÜN İÇİ TARAMASI"
+    @contextmanager
+    def _conn(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _init_db(self):
+        with self._conn() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS portfolio (
+                    id INTEGER PRIMARY KEY, capital REAL, cash REAL, updated_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS positions (
+                    symbol TEXT PRIMARY KEY, entry REAL, qty INTEGER, sl REAL, tp REAL,
+                    original_sl REAL, cost REAL, entry_date TEXT, strategy TEXT,
+                    breakeven_moved INTEGER DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS closed_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, entry REAL,
+                    exit REAL, qty INTEGER, pnl REAL, pnl_pct REAL, reason TEXT, closed_at TEXT
+                );
+            """)
+            if conn.execute("SELECT COUNT(*) FROM portfolio").fetchone()[0] == 0:
+                conn.execute(
+                    "INSERT INTO portfolio (id, capital, cash, updated_at) VALUES (1,?,?,?)",
+                    (INITIAL_CAPITAL, INITIAL_CAPITAL, datetime.now(TZ).isoformat())
+                )
+
+    def get_state(self) -> Dict:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM portfolio WHERE id=1").fetchone()
+            positions = {p["symbol"]: dict(p) for p in conn.execute("SELECT * FROM positions")}
+            return {"capital": row["capital"], "cash": row["cash"], "positions": positions}
+
+    def _calc_qty(self, price: float, sl: float, cash: float, capital: float) -> int:
+        if price <= 0 or sl >= price:
+            return 0
+        risk_amount = capital * (RISK_PER_TRADE_PCT / 100)
+        risk_per_share = price - sl
+        if risk_per_share <= 0:
+            return 0
+        qty = int(risk_amount / risk_per_share)
+        max_cost = capital * (MAX_POSITION_PCT / 100)
+        qty = min(qty, int(max_cost / price))
+        if qty * price > cash:
+            qty = int(cash / price)
+        return max(qty, 0)
+
+    def open_positions(self, candidates: List[Dict]):
+        if not is_trading_time():
+            logger.info("İşlem saatleri dışında – alım yok")
+            return
+        if not candidates:
+            return
+        state = self.get_state()
+        if len(state["positions"]) >= MAX_POSITIONS:
+            return
+        available = [c for c in candidates if c["symbol"] not in state["positions"]]
+        if not available:
+            return
+        slots = MAX_POSITIONS - len(state["positions"])
+        to_buy = available[:slots]
+        cash = state["cash"]
+        capital = state["capital"]
+        if cash < 500:
+            return
+        opened = []
+        with self._conn() as conn:
+            for item in to_buy:
+                symbol, price, sl = item["symbol"], item["fiyat"], item["sl"]
+                qty = self._calc_qty(price, sl, cash, capital)
+                if qty < 1:
+                    continue
+                cost = qty * price
+                if cost > cash:
+                    continue
+                strategy = item.get("primary_strategy", "DIP")
+                conn.execute("""
+                    INSERT INTO positions
+                    (symbol, entry, qty, sl, tp, original_sl, cost, entry_date, strategy, breakeven_moved)
+                    VALUES (?,?,?,?,?,?,?,?,?,0)
+                """, (symbol, price, qty, sl, item["tp"], sl, round(cost,2),
+                      datetime.now(TZ).strftime("%Y-%m-%d"), strategy))
+                cash -= cost
+                opened.append({"symbol": symbol, "qty": qty, "entry": price,
+                               "sl": sl, "tp": item["tp"], "cost": cost, "strategy": strategy})
+                logger.info(f"ALIM → {symbol} {qty} adet @ {price} [{strategy}]")
+            conn.execute("UPDATE portfolio SET cash=?, updated_at=? WHERE id=1",
+                         (round(cash,2), datetime.now(TZ).isoformat()))
+        if opened:
+            msg = "💰 <b>SANAL CÜZDAN — YENİ POZİSYONLAR</b>\n"
+            msg += f"📅 {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}\n"
+            msg += f"💵 Kalan Nakit: <b>{cash:,.2f} ₺</b>\n\n"
+            for p in opened:
+                msg += (f"🔹 <b>#{p['symbol']}</b> [{p['strategy']}]\n"
+                        f"├ Giriş: {p['entry']} × {p['qty']}\n"
+                        f"├ 🛑 SL: {p['sl']} | 🎯 TP: {p['tp']}\n"
+                        f"└ Maliyet: {p['cost']:,.2f} ₺\n\n")
+            send_telegram(msg)
+
+    def update(self):
+        state = self.get_state()
+        if not state["positions"]:
+            return
+        closed = []
+        with self._conn() as conn:
+            for symbol, pos in list(state["positions"].items()):
+                df = fetch_ohlcv(symbol, "10d", "1d")
+                if df is None or len(df) < 5:
+                    continue
+                current = float(df["Close"].iloc[-1])
+                prev = float(df["Close"].iloc[-2])
+                today_chg = ((current - prev) / prev) * 100
+                last_vol = float(df["Volume"].iloc[-1])
+                avg5 = float(df["Volume"].iloc[-6:-1].mean())
+                rvol = last_vol / avg5 if avg5 > 0 else 0
+                last3 = df["Close"].iloc[-3:].values
+                is_rising = all(last3[i] <= last3[i+1] for i in range(len(last3)-1))
+                strong_momentum = (rvol >= MIN_RVOL_MOMENTUM and today_chg > 0
+                                   and is_rising and current > pos["entry"])
+
+                entry, qty = pos["entry"], pos["qty"]
+                pnl_pct = ((current - entry) / entry) * 100
+
+                if not pos["breakeven_moved"] and pnl_pct >= BREAKEVEN_TRIGGER:
+                    conn.execute("UPDATE positions SET sl=?, breakeven_moved=1 WHERE symbol=?",
+                                 (entry, symbol))
+                    logger.info(f"{symbol} → SL girişe çekildi")
+
+                if strong_momentum:
+                    logger.info(f"{symbol} → Momentum güçlü, satılmıyor (RVOL {rvol:.2f})")
+                    continue
+
+                if current >= pos["tp"]:
+                    pnl = (current - entry) * qty
+                    self._close(conn, symbol, current, qty, entry, pnl, pnl_pct, "TP")
+                    closed.append({"symbol": symbol, "reason": "TP", "pnl": pnl, "pnl_pct": pnl_pct,
+                                   "entry": entry, "exit": current, "qty": qty})
+                    continue
+
+                row = conn.execute("SELECT sl, breakeven_moved FROM positions WHERE symbol=?", (symbol,)).fetchone()
+                if row and current <= row["sl"]:
+                    pnl = (current - entry) * qty
+                    reason = "BREAKEVEN" if row["breakeven_moved"] else "SL"
+                    self._close(conn, symbol, current, qty, entry, pnl, pnl_pct, reason)
+                    closed.append({"symbol": symbol, "reason": reason, "pnl": pnl, "pnl_pct": pnl_pct,
+                                   "entry": entry, "exit": current, "qty": qty})
+        if closed:
+            state = self.get_state()
+            msg = "🔔 <b>POZİSYON KAPANDI</b>\n\n"
+            for c in closed:
+                emoji = "🟢" if c["pnl"] >= 0 else "🔴"
+                msg += (f"{emoji} <b>#{c['symbol']}</b> → {c['reason']}\n"
+                        f"├ {c['entry']} → {c['exit']} | Adet: {c['qty']}\n"
+                        f"└ PnL: <b>{c['pnl']:+.2f} ₺ (%{c['pnl_pct']:+.2f})</b>\n\n")
+            msg += f"💵 Nakit: <b>{state['cash']:,.2f} ₺</b>"
+            send_telegram(msg)
+
+    def _close(self, conn, symbol, exit_price, qty, entry, pnl, pnl_pct, reason):
+        conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        conn.execute("""INSERT INTO closed_trades
+            (symbol, entry, exit, qty, pnl, pnl_pct, reason, closed_at)
+            VALUES (?,?,?,?,?,?,?,?)""",
+            (symbol, entry, exit_price, qty, round(pnl,2), round(pnl_pct,2),
+             reason, datetime.now(TZ).isoformat()))
+        conn.execute("UPDATE portfolio SET cash = cash + ?, updated_at=? WHERE id=1",
+                     (exit_price * qty, datetime.now(TZ).isoformat()))
+        logger.info(f"KAPANDI → {symbol} | {reason} | {pnl:+.2f}")
+
+portfolio = PortfolioManager()
+
+# ===================== TARAMA =====================
+def run_scan(label: str = "TARAMA"):
+    now_str = datetime.now(TZ).strftime("%H:%M:%S")
+    logger.info(f"[{now_str}] {label} başlıyor...")
+    symbols = get_all_tickers()
+    results = scan_symbols(symbols, max_workers=6)
+
+    buy_list = [r for r in results if r.get("strateji_dip") or r.get("strateji_bb") or r.get("strateji_breakout")]
+
     tarih = datetime.now(TZ).strftime("%d.%m.%Y - %H:%M")
+    baslik = "🌙 GECE BÜLTENİ" if "23:00" in label else "GÜN İÇİ"
 
-    # 1) Ana liste
-    if ana_liste:
-        mesaj = f"🎯 <b>[DİP + BB + DÜŞÜK PD/DD | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in ana_liste:
-            uyari = "🚨" if item["kap_onemli"] else ""
-            durum = (
-                f"🚀 <b>Durum:</b> DÜŞEN KIRILIMI ONAYLANDI {item['yildizlar']}"
-                if item["trend_kirilimi"]
-                else f"📊 <b>Durum:</b> Dipte Güç Topluyor {item['yildizlar']}"
-            )
-            strateji_adi = "Klasik Dip" if item["strateji_a"] else "BB Alt + Düşük PD/DD"
-            hisse_str = (
-                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> (%+{item['change_pct']}) {uyari}\n"
-                f"├ {durum}\n"
-                f"├ <b>Strateji:</b> {strateji_adi}\n"
-                f"├ <b>Hacim:</b> {item['hacim_tl']} TL | RVOL10: {item['rvol']}x | RVOL5: {item['rvol_5']}x\n"
-                f"├ <b>RSI:</b> {item['rsi_d']} | Stoch: {item['stoch_k']} | {item['tahta_durumu']}\n"
-            )
-            if item.get("pb_ratio"):
-                hisse_str += f"├ <b>PD/DD:</b> {item['pb_ratio']}\n"
-            hisse_str += (
-                f"├ 🛑 <b>SL:</b> {item['sl']} TL | 🎯 <b>TP:</b> {item['tp']} TL\n"
-                f"└ 📢 <b>KAP:</b> <i>{item['kap_ozeti']}</i>\n\n"
-            )
-            if len(mesaj) + len(hisse_str) > 3800:
-                send_telegram_msg(mesaj)
-                mesaj = ""
-                time.sleep(1)
-            mesaj += hisse_str
-        if mesaj.strip():
-            send_telegram_msg(mesaj)
+    if results:
+        msg = f"🎯 <b>[SİNYALLER | {baslik}]</b>\n📅 <i>{tarih}</i>\n\n"
+        for item in results[:12]:
+            msg += (f"🔹 <b>#{item['symbol']}</b> | {item['fiyat']} TL (%+{item['change_pct']})\n"
+                    f"├ Strateji: <b>{item['primary_strategy']}</b>\n"
+                    f"├ Hacim: {item['hacim_tl']:,.0f} | RVOL: {item['rvol']}x\n"
+                    f"├ RSI: {item['rsi_d']} | Stoch: {item['stoch_k']}\n"
+                    f"├ 🛑 SL: {item['sl']} | 🎯 TP: {item['tp']}\n\n")
+            if len(msg) > 3500:
+                send_telegram(msg)
+                msg = ""
+        if msg.strip():
+            send_telegram(msg)
     else:
-        send_telegram_msg(f"ℹ️ <b>{scan_time}</b> — Ana stratejiye uyan hisse yok.")
+        send_telegram(f"ℹ️ <b>{label}</b> — Sinyal yok.")
 
-    # 2) %5+
-    if yuzde5_liste:
-        mesaj = f"🚀 <b>[%5 VE ÜZERİ YÜKSELENLER | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in yuzde5_liste[:15]:
-            mesaj += (
-                f"🔹 <b>#{item['symbol']}</b> | <b>{item['fiyat']} TL</b> <b>(%+{item['change_pct']})</b>\n"
-                f"├ Hacim: {item['hacim_tl']} | RVOL: {item['rvol']}x\n"
-                f"└ KAP: <i>{item['kap_ozeti']}</i>\n\n"
-            )
-            if len(mesaj) > 3800:
-                send_telegram_msg(mesaj)
-                mesaj = ""
-        if mesaj.strip():
-            send_telegram_msg(mesaj)
+    if buy_list:
+        portfolio.open_positions(buy_list)
+    portfolio.update()
+    logger.info(f"Bitti → Sinyal: {len(results)} | Alım adayı: {len(buy_list)}")
+    return results
 
-    # 3) Hacim patlaması
-    if hacim_liste:
-        mesaj = f"💥 <b>[HACİM ≥20M + RVOL≥1 | {baslik_ek}]</b>\n📅 <i>{tarih}</i>\n\n"
-        for item in hacim_liste[:15]:
-            mesaj += (
-                f"🔹 <b>#{item['symbol']}</b> | {item['fiyat']} TL (%+{item['change_pct']})\n"
-                f"├ Hacim: <b>{item['hacim_tl']}</b> | RVOL: <b>{item['rvol']}x</b>\n"
-                f"└ KAP: <i>{item['kap_ozeti']}</i>\n\n"
-            )
-            if len(mesaj) > 3800:
-                send_telegram_msg(mesaj)
-                mesaj = ""
-        if mesaj.strip():
-            send_telegram_msg(mesaj)
-
-    # --- SANAL CÜZDAN ---
-    if ana_liste:
-        open_positions_from_ana_liste(ana_liste)
-
-    # Her taramada açık pozisyonları kontrol et
-    update_portfolio()
-
-    # 4) 23:00 özel akış
-    if scan_time == "23:00":
-        send_previous_night_performance_report()
-        send_night_summary_table(ana_liste, yuzde5_liste, hacim_liste)
-
-        night_items = {}
-        for lst in (ana_liste, yuzde5_liste, hacim_liste):
-            for it in lst:
-                sym = it["symbol"]
-                if sym not in night_items:
-                    night_items[sym] = {
-                        "fiyat": it["fiyat"],
-                        "sl": it["sl"],
-                        "tp": it["tp"],
-                        "rvol": it["rvol"],
-                        "hacim_tl": it["hacim_tl"],
-                        "change_pct": it["change_pct"],
-                    }
-        save_night_candidates(night_items)
-
-        if night_items:
-            send_telegram_msg(
-                f"💾 <b>Yarının tavan adayları kaydedildi</b>\n"
-                f"Adet: <b>{len(night_items)}</b>\n"
-                f"Yarın 23:00’da kapanış performansı raporlanacak."
-            )
-
-    logger.info(
-        f"Bitti → Ana:{len(ana_liste)} | %5+:{len(yuzde5_liste)} | Hacim:{len(hacim_liste)}"
-    )
-
-
-# ============================================================
-# ANA DÖNGÜ
-# ============================================================
+# ===================== ANA DÖNGÜ =====================
 def main():
-    now = datetime.now(TZ)
-    current_time_str = now.strftime("%H:%M")
+    logger.info("=" * 50)
+    logger.info(f"BIST Bot başlıyor | Sermaye: {INITIAL_CAPITAL:,.0f} ₺")
+    logger.info("=" * 50)
 
-    send_telegram_msg(
-        "🤖 <b>BİST BOTU — SANAL CÜZDAN ENTEGRE</b>\n"
-        "⏰ 09:50 | 10:10 | 17:45 | 23:00\n"
-        "💰 Sanal Cüzdan: 20.000 ₺\n"
-        "📋 Sadece DİP + BB + Düşük PD/DD listesinden alım\n"
-        "🕐 İşlem saatleri: Hafta içi 09:00-18:00 (tatil hariç)\n"
-        "🚀 Sistem aktif..."
+    send_telegram(
+        "🤖 <b>BİST BOT – TEK DOSYA</b>\n"
+        "────────────────────\n"
+        f"💰 Cüzdan: <b>{INITIAL_CAPITAL:,.0f} ₺</b>\n"
+        f"📊 Max Pozisyon: {MAX_POSITIONS}\n"
+        f"🎯 Risk/İşlem: %{RISK_PER_TRADE_PCT}\n"
+        f"🕐 İşlem: {TRADING_START}-{TRADING_END} (tatil hariç)\n"
+        f"⏰ Tarama: {' | '.join(SCAN_TIMES)}\n"
+        "🚀 Aktif..."
     )
 
     try:
-        check_kap_news()
-        hedef = get_all_bist_tickers()
-        scan_bist_stocks(hedef, f"İLK AÇILIŞ TESTİ ({current_time_str})")
-        send_telegram_msg("✅ Açılış testi tamamlandı. Alarm saatleri bekleniyor.")
+        run_scan("AÇILIŞ TESTİ")
+        send_telegram("✅ Açılış tamam. Saatler bekleniyor.")
     except Exception as e:
-        send_telegram_msg(f"❌ Açılış hatası: {e}")
+        logger.exception("Açılış hatası")
+        send_telegram(f"❌ Açılış hatası: {e}")
 
+    scanned = set()
     while True:
         try:
             now = datetime.now(TZ)
-            loop_time = now.strftime("%H:%M")
-            loop_date = now.strftime("%Y-%m-%d")
-            check_kap_news()
-            scan_key = f"{loop_date}_{loop_time}"
-
-            if loop_time in TARGET_SCAN_TIMES and scan_key not in SCANNED_TIMES_TODAY:
-                hedef = get_all_bist_tickers()
-                scan_bist_stocks(hedef, loop_time)
-                SCANNED_TIMES_TODAY.add(scan_key)
-
-                if loop_time == "23:00":
-                    PROCESSED_KAP_LINKS.clear()
-                    SCANNED_TIMES_TODAY.clear()
-
+            hm = now.strftime("%H:%M")
+            key = f"{now.strftime('%Y-%m-%d')}_{hm}"
+            if is_scan_time(now) and key not in scanned:
+                run_scan(hm)
+                scanned.add(key)
+                if hm == "23:00":
+                    scanned.clear()
             time.sleep(25)
         except KeyboardInterrupt:
+            send_telegram("🛑 Bot durduruldu.")
             break
         except Exception as e:
-            logger.error(f"Döngü hatası: {e}")
+            logger.exception("Döngü hatası")
             time.sleep(30)
-
 
 if __name__ == "__main__":
     main()
