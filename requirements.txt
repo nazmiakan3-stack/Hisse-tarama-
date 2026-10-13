@@ -1,6 +1,6 @@
-requests 
-feedparser 
-yfinance 
-pandas 
-pandas-ta 
-numpy
+requests
+yfinance
+pandas
+pandas-ta
+httpx
+python-dotenv
